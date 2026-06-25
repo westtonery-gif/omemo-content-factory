@@ -1,0 +1,38 @@
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+
+# --- Virtual environments ---------------------------------------------------
+.venv/
+venv/
+env/
+.python-version
+
+# --- Environment & secrets (NEVER commit real secrets) ----------------------
+.env
+.env.*
+!.env.example
+
+# --- Tooling caches ---------------------------------------------------------
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# --- IDE / editor -----------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+
+# --- OS ---------------------------------------------------------------------
+.DS_Store
+Thumbs.db

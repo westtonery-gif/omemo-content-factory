@@ -1,0 +1,76 @@
+# Project metadata and tooling configuration for OMEMO Content Factory.
+# Scope: ROADMAP Stage 1 (engineering foundation only). No runtime dependencies
+# are declared yet — domain logic, adapters and integrations arrive in later stages.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "omemo-content-factory"
+dynamic = ["version"]
+description = "Industrial multi-agent content production system for OMEMO Health."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "OMEMO Health" }]
+keywords = ["content", "multi-agent", "automation", "omemo-health"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+    "Private :: Do Not Upload",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+
+[tool.hatch.version]
+path = "src/omemo_content_factory/__about__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/omemo_content_factory"]
+
+# --- Formatter & linter (Ruff: a single tool for both) -----------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "C90", "RUF"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+# --- Static typing (mypy, strict) --------------------------------------------
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src", "tests"]
+mypy_path = "src"
+strict = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+# --- Tests (pytest) ----------------------------------------------------------
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+
+[tool.coverage.run]
+source = ["omemo_content_factory"]
+branch = true
