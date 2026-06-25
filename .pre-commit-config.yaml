@@ -1,0 +1,37 @@
+# Pre-commit hooks — first-level quality gate (ADR-0002 Revision 1).
+#
+# Scope: ROADMAP Stage 1. ONLY the checks approved by ADR-0002 are configured:
+#   - Ruff Format
+#   - Ruff Check
+#   - mypy
+# No additional or third-party hooks are added.
+#
+# Hooks run the tools from the project's dev install (pip install -e ".[dev]")
+# via `language: system`, so their versions and configuration stay
+# single-sourced in pyproject.toml (ADR-0002 "Project Configuration").
+#
+# Pre-commit is the FIRST level of quality control and does NOT replace CI,
+# which remains the authoritative gate (ADR-0002 "Continuous Integration").
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-format
+        name: Ruff Format
+        entry: ruff format
+        language: system
+        types_or: [python, pyi]
+
+      - id: ruff-check
+        name: Ruff Check
+        entry: ruff check
+        language: system
+        types_or: [python, pyi]
+
+      - id: mypy
+        name: Mypy
+        entry: mypy
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+        require_serial: true

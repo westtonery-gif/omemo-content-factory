@@ -26,3 +26,4 @@ be recorded as ADRs (PROJECT.md, sections 11 and 17).
 |-----|-------|--------|
 | [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted |
 | [0002](0002-stage-1-tooling-and-project-scaffold.md) | Stage 1 tooling and project scaffold | Accepted |
+| [0003](0003-run-domain-model-interface-contract.md) | Run domain model interface contract | Proposed |

@@ -71,6 +71,50 @@ pytest                  # tests
 
 Use `ruff format .` to apply formatting, and `pytest --cov` for coverage.
 
+## Using pre-commit
+
+`pre-commit` is the **first level of quality control** (ADR-0002 Revision 1). It
+runs the approved checks automatically each time you create a commit, so obvious
+problems are caught **before** they enter the repository. It does **not** replace
+CI — CI remains the authoritative gate (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+
+**1. Install the dependencies** (the dev extra includes `pre-commit` and the
+tools the hooks use):
+
+```bash
+pip install -e ".[dev]"
+```
+
+**2. Install the git hooks** (one-time, per clone):
+
+```bash
+pre-commit install
+```
+
+**What happens on commit.** When you run `git commit`, pre-commit runs the three
+approved checks on the project:
+
+- **Ruff Format** — applies formatting;
+- **Ruff Check** — lints the code;
+- **mypy** — static type checking (strict).
+
+If everything passes, the commit is created. If a check fails (or Ruff Format
+reformats files), **the commit is aborted**.
+
+**If a check fails:**
+
+1. Read the hook output to see what failed.
+2. If **Ruff Format** changed files, or you fix lint/type errors, **re-stage**
+   the changed files (`git add ...`) and commit again.
+3. Re-run the hooks manually at any time without committing:
+
+   ```bash
+   pre-commit run --all-files
+   ```
+
+> Bypassing the hooks (`git commit --no-verify`) is discouraged: CI runs the same
+> checks and will fail the Pull Request anyway.
+
 ## Running the smoke entrypoint
 
 A Stage 1 entrypoint that proves the package installs, imports and reads
@@ -93,6 +137,7 @@ omemo-content-factory/
 ├── CONTRIBUTING.md             # Workflow, branching, quality gate
 ├── LICENSE                     # MIT
 ├── pyproject.toml              # Project metadata + tool config (ruff/mypy/pytest)
+├── .pre-commit-config.yaml     # Pre-commit hooks: Ruff Format, Ruff Check, mypy
 ├── .env.example                # Documented environment variables
 ├── .gitignore
 ├── .github/

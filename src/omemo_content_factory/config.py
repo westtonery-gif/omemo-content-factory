@@ -16,13 +16,13 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 APP_ENV_VAR = "OMEMO_APP_ENV"
 LOG_LEVEL_VAR = "OMEMO_LOG_LEVEL"
 
 
-class AppEnv(str, Enum):
+class AppEnv(StrEnum):
     """Application runtime environment."""
 
     DEVELOPMENT = "development"
@@ -30,9 +30,7 @@ class AppEnv(str, Enum):
     PRODUCTION = "production"
 
 
-_VALID_LOG_LEVELS = frozenset(
-    {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
-)
+_VALID_LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"})
 
 DEFAULT_APP_ENV = AppEnv.DEVELOPMENT
 DEFAULT_LOG_LEVEL = "INFO"
@@ -59,9 +57,7 @@ def _parse_app_env(raw: str | None) -> AppEnv:
         return AppEnv(normalized)
     except ValueError:
         valid = ", ".join(member.value for member in AppEnv)
-        raise ValueError(
-            f"Invalid {APP_ENV_VAR}={raw!r}; expected one of: {valid}."
-        ) from None
+        raise ValueError(f"Invalid {APP_ENV_VAR}={raw!r}; expected one of: {valid}.") from None
 
 
 def _parse_log_level(raw: str | None) -> str:
@@ -70,9 +66,7 @@ def _parse_log_level(raw: str | None) -> str:
     normalized = raw.strip().upper()
     if normalized not in _VALID_LOG_LEVELS:
         valid = ", ".join(sorted(_VALID_LOG_LEVELS))
-        raise ValueError(
-            f"Invalid {LOG_LEVEL_VAR}={raw!r}; expected one of: {valid}."
-        )
+        raise ValueError(f"Invalid {LOG_LEVEL_VAR}={raw!r}; expected one of: {valid}.")
     return normalized
 
 

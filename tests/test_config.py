@@ -46,4 +46,4 @@ def test_invalid_log_level_raises() -> None:
 def test_config_is_immutable() -> None:
     config = load_config({})
     with pytest.raises(AttributeError):
-        setattr(config, "log_level", "DEBUG")
+        config.log_level = "DEBUG"  # type: ignore[misc]  # frozen: assignment must raise
