@@ -1,0 +1,97 @@
+"""Minimal task-execution slice — prove a Run can execute one Task end to end.
+
+This is the **smallest application-layer component** that drives a single Task through its
+lifecycle inside a Run, coordinating everything **through the Run aggregate root** (never
+bypassing it) and using an injected, deterministic executor instead of doing real work.
+
+It validates the architecture, not a feature: a Run creates a Task, the Task transitions
+through its lifecycle, Run coordinates it, domain events are recorded and the aggregate
+invariants hold (including "a Run cannot complete with a non-terminal Task").
+
+A successful execution that carries both an ``output`` and a ``schema_ref`` now records a
+domain ``Output`` for the Task, through the Run root (ADR-0005). Still deliberately **out of
+scope** (not added): QA / Human Approval; providers; adapters; queues; Skills; Tools; and any
+infrastructure. The executor stays a plain execution port — it is intentionally *not* modelled
+as an Agent here.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+from omemo_content_factory.domain.run import Actor, Run
+from omemo_content_factory.domain.task import TaskId, TaskStatus
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionResult:
+    """What a task executor produced for one Task (application-layer, not a domain Output).
+
+    ``succeeded`` decides the Task's terminal outcome; ``output`` carries the produced content
+    on success and ``schema_ref`` the (opaque) contract it conforms to — together they are
+    recorded as the Task's domain ``Output``; ``failure_reason`` explains a failure and is
+    routed to the Task's FAILED reason.
+    """
+
+    succeeded: bool
+    output: str | None = None
+    schema_ref: str | None = None
+    failure_reason: str | None = None
+
+
+class TaskExecutor(Protocol):
+    """Performs a Task's work and reports the outcome — a plain execution abstraction.
+
+    A single, explicit, injected dependency (PROJECT.md §6) that decouples task orchestration
+    from *how* the work is done. The minimal slice supplies a deterministic fake; any concrete
+    executor implements the same contract without changing this orchestration (Open/Closed,
+    PROJECT.md §4.11). It is intentionally just an execution port, not tied to any particular
+    kind of worker (in particular, it is not an Agent).
+    """
+
+    def execute(self, task_input: str) -> ExecutionResult: ...
+
+
+def execute_task(
+    run: Run,
+    executor: TaskExecutor,
+    *,
+    workflow_step_ref: str,
+    agent_ref: str,
+    task_input: str,
+) -> TaskId:
+    """Open and run one Task inside ``run``, driving it to a terminal outcome.
+
+    Acts in the Content Director role: every Task operation goes through the Run aggregate
+    root (``open_task`` / ``transition_task`` / ``record_output``), so Run coordinates the Task,
+    records the domain events and keeps its invariants. A successful execution ends the Task in
+    ``SUCCEEDED`` and, when the result carries both an ``output`` and a ``schema_ref``, records
+    the Task's domain ``Output``; a failed one ends it in ``FAILED`` carrying the reason. Returns
+    the new Task's id.
+    """
+    task_id = run.open_task(
+        workflow_step_ref=workflow_step_ref,
+        agent_ref=agent_ref,
+        task_input=task_input,
+        by=Actor.CONTENT_DIRECTOR,
+    )
+    run.transition_task(task_id, TaskStatus.RUNNING, by=Actor.CONTENT_DIRECTOR)
+    result = executor.execute(task_input)
+    if not result.succeeded:
+        run.transition_task(
+            task_id,
+            TaskStatus.FAILED,
+            by=Actor.CONTENT_DIRECTOR,
+            reason=result.failure_reason,
+        )
+        return task_id
+    run.transition_task(task_id, TaskStatus.SUCCEEDED, by=Actor.CONTENT_DIRECTOR)
+    if result.output is not None and result.schema_ref is not None:
+        run.record_output(
+            task_id,
+            payload=result.output,
+            schema_ref=result.schema_ref,
+            by=Actor.CONTENT_DIRECTOR,
+        )
+    return task_id

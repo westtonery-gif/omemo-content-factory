@@ -7,10 +7,18 @@ model interface contract"**, the sole source of the technical contract. The publ
 accepted contract — only ``Run`` itself moves from a ``Protocol`` stub to a concrete,
 instantiable aggregate, as ADR-0003 §3 requires (construction via ``Run.create()``).
 
-It contains no infrastructure, persistence, serialization, async/threading, child aggregates
-or integrations (out of scope; see the module's accompanying acceptance docs).
+**ADR-0004 "Task aggregate — Run↔Task interface contract"** additively extends Run with
+management of its first child entity, ``Task`` (``open_task`` / ``transition_task`` /
+read-only ``tasks`` / ``task``). This is an Open/Closed extension (PROJECT.md §4.11): Run's
+existing behaviour, signatures and tests are unchanged; only new operations are added. The
+``Task`` entity itself lives in ``omemo_content_factory.domain.task``.
 
-Scenario identifiers in docstrings (e.g. ``HP-01``, ``FL-03``) refer to `RUN_ACCEPTANCE.md`.
+It contains no infrastructure, persistence, serialization, async/threading or integrations,
+and no child entities beyond ``Task`` (the others — Artifact, Evaluation, Human Review,
+Analytics Record — remain out of scope; see the accompanying acceptance docs).
+
+Scenario identifiers in docstrings (e.g. ``HP-01``, ``FL-03``, ``THP-01``) refer to
+`RUN_ACCEPTANCE.md` and `TASK_ACCEPTANCE.md`.
 
 Representation note (per ADR-0003 §3): identifiers and references the domain leaves opaque are
 represented as plain ``str`` references — the minimal typing needed, with no added semantics.
@@ -21,6 +29,32 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
+
+from omemo_content_factory.domain.artifact import (
+    Artifact,
+    ArtifactCreated,
+    ArtifactEvent,
+    ArtifactId,
+    ArtifactStatus,
+    ArtifactView,
+    DuplicateArtifactError,
+)
+from omemo_content_factory.domain.output import (
+    Output,
+    OutputEvent,
+    OutputId,
+    OutputStatus,
+    OutputValidated,
+)
+from omemo_content_factory.domain.task import (
+    Task,
+    TaskCreated,
+    TaskEvent,
+    TaskId,
+    TaskRetryPolicy,
+    TaskStatus,
+    TaskView,
+)
 
 
 class RunStatus(Enum):
@@ -197,6 +231,8 @@ class Run:
     """
 
     __slots__ = (
+        "_artifact_seq",
+        "_artifacts",
         "_content_brief_ref",
         "_events",
         "_failure_reason",
@@ -204,6 +240,8 @@ class Run:
         "_rework_policy",
         "_run_id",
         "_status",
+        "_task_seq",
+        "_tasks",
         "_workflow_version_ref",
     )
 
@@ -214,7 +252,11 @@ class Run:
     _status: RunStatus
     _rework_count: int
     _failure_reason: str | None
-    _events: list[RunEvent]
+    _events: list[RunEvent | TaskEvent | OutputEvent | ArtifactEvent]
+    _tasks: dict[TaskId, Task]
+    _task_seq: int
+    _artifacts: dict[ArtifactId, Artifact]
+    _artifact_seq: int
 
     def __init__(
         self,
@@ -233,6 +275,10 @@ class Run:
         self._rework_count = 0
         self._failure_reason = None
         self._events = []
+        self._tasks = {}
+        self._task_seq = 0
+        self._artifacts = {}
+        self._artifact_seq = 0
 
     def __setattr__(self, name: str, value: object) -> None:
         """Reject reassignment of immutable attributes and their backing fields.
@@ -305,8 +351,13 @@ class Run:
         return self._failure_reason
 
     @property
-    def events(self) -> Sequence[RunEvent]:
-        """Ordered, read-only sequence of events emitted since creation (`EV-01`..`EV-05`)."""
+    def events(self) -> Sequence[RunEvent | TaskEvent | OutputEvent | ArtifactEvent]:
+        """Ordered, read-only sequence of events emitted since creation.
+
+        Holds Run events (`EV-01`..`EV-05`), Task events (`TEV-01`..`TEV-06`, ADR-0004 §7),
+        Output events (`OutputValidated`, ADR-0005 §7) and Artifact events (`ArtifactCreated`,
+        ADR-0006 §8), in one Run log.
+        """
         return tuple(self._events)
 
     def transition(self, to: RunStatus, by: Actor, reason: str | None = None) -> None:
@@ -320,6 +371,7 @@ class Run:
         """
         self._ensure_authorised(by)
         self._ensure_allowed(to)
+        self._ensure_children_terminal_for_completion(to)
         if self._is_rework(to):
             self._register_rework()
         previous = self._status
@@ -330,6 +382,153 @@ class Run:
         if event is not None:
             self._record(event)
 
+    # --- Task child management (additive, ADR-0004) --------------------------------------
+
+    def open_task(
+        self,
+        workflow_step_ref: str,
+        agent_ref: str,
+        task_input: str,
+        by: Actor,
+        retry_policy: TaskRetryPolicy | None = None,
+    ) -> TaskId:
+        """Create a child Task in ``PENDING`` inside this Run and emit ``TaskCreated``.
+
+        Authorised actor only (the Content Director); the Task is owned by this Run, its id is
+        generated deterministically and returned (ADR-0004 §3, §4). ``retry_policy`` defaults
+        to ``TaskRetryPolicy()`` when ``None`` (`THP-01`, `TAGG-01`, `INV-07`; event `TEV-01`).
+        """
+        self._ensure_authorised(by)
+        self._task_seq += 1
+        task_id = f"{self._run_id}-task-{self._task_seq}"
+        self._tasks[task_id] = Task(
+            task_id=task_id,
+            run_id=self._run_id,
+            workflow_step_ref=workflow_step_ref,
+            agent_ref=agent_ref,
+            task_input=task_input,
+            retry_policy=retry_policy if retry_policy is not None else TaskRetryPolicy(),
+        )
+        self._record(
+            TaskCreated(
+                run_id=self._run_id,
+                task_id=task_id,
+                workflow_step_ref=workflow_step_ref,
+                agent_ref=agent_ref,
+            )
+        )
+        return task_id
+
+    def transition_task(
+        self, task_id: TaskId, to: TaskStatus, by: Actor, reason: str | None = None
+    ) -> None:
+        """Drive a guarded transition of an owned Task through the root (ADR-0004 §4, §5).
+
+        Actor authorisation (Content Director only) plus the Task allowed-transitions table and
+        the attempt bound make up the single mutation; any emitted Task event is recorded in
+        this Run's event log (`THP-02`..`THP-04`, `TRW-*`, `TFL-01`..`TFL-03`, `TEV-*`).
+        """
+        self._ensure_authorised(by)
+        event = self._tasks[task_id].apply_transition(to, reason)
+        if event is not None:
+            self._record(event)
+
+    def record_output(
+        self, task_id: TaskId, *, payload: str, schema_ref: str, by: Actor
+    ) -> OutputId:
+        """Record the immutable Output of a succeeded Task, through the root (ADR-0005 §5).
+
+        Authorised actor only (the Content Director). The Task must be ``SUCCEEDED`` (Output
+        exists only for a successful Task) and must not already have one (1:1) — both enforced
+        by the Task. Creates a ``VALID`` Output, attaches it, emits ``OutputValidated`` in the
+        Run's event log, and returns the new Output's id.
+        """
+        self._ensure_authorised(by)
+        task = self._tasks[task_id]
+        output_id = f"{task_id}-output"
+        output = Output(
+            output_id=output_id,
+            task_id=task_id,
+            schema_ref=schema_ref,
+            payload=payload,
+            status=OutputStatus.VALID,
+        )
+        task.attach_output(output)
+        self._record(OutputValidated(run_id=self._run_id, task_id=task_id, output_id=output_id))
+        return output_id
+
+    @property
+    def tasks(self) -> Sequence[TaskView]:
+        """Read-only snapshots of the Tasks owned by this Run (ADR-0004 §4; `TAGG-03`)."""
+        return tuple(child.view for child in self._tasks.values())
+
+    def task(self, task_id: TaskId) -> TaskView:
+        """Read-only snapshot of one owned Task (ADR-0004 §4; `TAGG-03`)."""
+        return self._tasks[task_id].view
+
+    # --- Artifact child management (additive, ADR-0006) ----------------------------------
+
+    def create_artifact(self, output_id: OutputId, *, kind: str, by: Actor) -> ArtifactId:
+        """Create a ``DRAFT`` Artifact from an existing Output, through the root (ADR-0006 §5, §6).
+
+        Authorised actor only (the Content Director). The ``output_id`` must reference an Output
+        recorded in this Run (else ``KeyError``), and that Output must not already have produced
+        an Artifact (1:1, else ``DuplicateArtifactError``). The new Artifact takes its content
+        from the Output's payload and records the provenance; ``ArtifactCreated`` is emitted.
+        """
+        self._ensure_authorised(by)
+        output = self._require_output(output_id)
+        self._ensure_output_unused(output_id)
+        self._artifact_seq += 1
+        artifact_id = f"{self._run_id}-artifact-{self._artifact_seq}"
+        self._artifacts[artifact_id] = Artifact(
+            artifact_id=artifact_id,
+            run_id=self._run_id,
+            output_ref=output_id,
+            kind=kind,
+            content=output.payload,
+            version=1,
+        )
+        self._record(
+            ArtifactCreated(
+                run_id=self._run_id,
+                artifact_id=artifact_id,
+                output_ref=output_id,
+                kind=kind,
+            )
+        )
+        return artifact_id
+
+    def transition_artifact(self, artifact_id: ArtifactId, to: ArtifactStatus, by: Actor) -> None:
+        """Drive a guarded status transition of an owned Artifact through the root (ADR-0006 §6).
+
+        Authorised actor only; only the wired edge ``DRAFT -> CANDIDATE`` is allowed at this stage.
+        """
+        self._ensure_authorised(by)
+        self._artifacts[artifact_id].apply_transition(to)
+
+    @property
+    def artifacts(self) -> Sequence[ArtifactView]:
+        """Read-only snapshots of the Artifacts owned by this Run (ADR-0006 §6)."""
+        return tuple(artifact.view for artifact in self._artifacts.values())
+
+    def artifact(self, artifact_id: ArtifactId) -> ArtifactView:
+        """Read-only snapshot of one owned Artifact (ADR-0006 §6)."""
+        return self._artifacts[artifact_id].view
+
+    def _require_output(self, output_id: OutputId) -> Output:
+        """Return the owned Output with ``output_id``, scanning Tasks; ``KeyError`` if unknown."""
+        for task in self._tasks.values():
+            output = task.output
+            if output is not None and output.output_id == output_id:
+                return output
+        raise KeyError(output_id)
+
+    def _ensure_output_unused(self, output_id: OutputId) -> None:
+        """Enforce Output->Artifact 1:1 (ADR-0006 §5)."""
+        if any(artifact.output_ref == output_id for artifact in self._artifacts.values()):
+            raise DuplicateArtifactError(f"output {output_id} already has an Artifact")
+
     def _ensure_authorised(self, by: Actor) -> None:
         """Only the Content Director may change status (`FL-08`; `INV-03`)."""
         if by is not Actor.CONTENT_DIRECTOR:
@@ -339,6 +538,18 @@ class Run:
         """Reject any edge outside the allowed table, including out of a terminal (`FL-*`)."""
         if to not in _ALLOWED_TRANSITIONS[self._status]:
             raise InvalidTransitionError(f"transition {self._status} -> {to} is not allowed")
+
+    def _ensure_children_terminal_for_completion(self, to: RunStatus) -> None:
+        """Forbid reaching COMPLETED while any owned Task is non-terminal (ADR-0004 §9).
+
+        Cross-entity invariant: production is not successfully done while a step is unfinished
+        (`TXC-01`/`TXC-02`). Vacuously satisfied for a Run with no Tasks, so the Run reference
+        behaviour is unchanged.
+        """
+        if to is not RunStatus.COMPLETED:
+            return
+        if any(not child.is_terminal for child in self._tasks.values()):
+            raise InvalidTransitionError("cannot reach COMPLETED while a Task is non-terminal")
 
     def _is_rework(self, to: RunStatus) -> bool:
         """A return to RUNNING from a waiting state is a rework iteration (RUN_SPEC.md §4)."""
@@ -362,6 +573,6 @@ class Run:
             return RunFailed(run_id=self._run_id, reason=reason)
         return None
 
-    def _record(self, event: RunEvent) -> None:
-        """Append an emitted event to the Run's history."""
+    def _record(self, event: RunEvent | TaskEvent | OutputEvent | ArtifactEvent) -> None:
+        """Append an emitted event (Run, Task, Output or Artifact) to the single history log."""
         self._events.append(event)
