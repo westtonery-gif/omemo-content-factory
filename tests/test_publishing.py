@@ -20,7 +20,10 @@ from omemo_content_factory.application.task_execution import ExecutionResult
 from omemo_content_factory.domain.artifact import ArtifactStatus
 from omemo_content_factory.domain.human_review import ReviewStatus
 from omemo_content_factory.domain.run import Actor, Run, RunStatus
-from omemo_content_factory.infrastructure.telegram import TelegramPublisher
+from omemo_content_factory.infrastructure.telegram import (
+    TelegramPublisher,
+    TelegramReviewGateway,
+)
 
 CD = Actor.CONTENT_DIRECTOR
 REVIEWER = Actor.HUMAN_REVIEWER
@@ -147,3 +150,46 @@ def test_telegram_publisher_wraps_http_errors_as_publish_error() -> None:
     publisher = TelegramPublisher(token="TOKEN", chat_id="chat-1", client=client)
     with pytest.raises(PublishError):
         publisher.publish("hello")
+
+
+# --- Telegram approval gateway (offline) -------------------------------------------------
+
+
+def _gateway_client(callback_data: str, reviewer_id: int) -> httpx.Client:
+    """A MockTransport client: empty drain, then one callback tap from the reviewer."""
+    state = {"polls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/sendMessage"):
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+        if path.endswith("/answerCallbackQuery"):
+            return httpx.Response(200, json={"ok": True, "result": True})
+        if path.endswith("/getUpdates"):
+            state["polls"] += 1
+            if state["polls"] == 1:  # the initial drain
+                return httpx.Response(200, json={"ok": True, "result": []})
+            update = {
+                "update_id": 7,
+                "callback_query": {"id": "cb", "from": {"id": reviewer_id}, "data": callback_data},
+            }
+            return httpx.Response(200, json={"ok": True, "result": [update]})
+        return httpx.Response(404)
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_review_gateway_returns_true_when_the_reviewer_taps_approve() -> None:
+    """An Approve tap from the configured reviewer yields True."""
+    gateway = TelegramReviewGateway(
+        token="T", reviewer_chat_id=999, client=_gateway_client("approve", 999)
+    )
+    assert gateway.request_approval("a post") is True
+
+
+def test_review_gateway_returns_false_when_the_reviewer_taps_reject() -> None:
+    """A Reject tap from the configured reviewer yields False."""
+    gateway = TelegramReviewGateway(
+        token="T", reviewer_chat_id=999, client=_gateway_client("reject", 999)
+    )
+    assert gateway.request_approval("a post") is False

@@ -54,6 +54,11 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "C90", "RUF"]
 [tool.ruff.lint.mccabe]
 max-complexity = 10
 
+[tool.ruff.lint.per-file-ignores]
+# demo.py carries intentional Russian (Cyrillic) text in sample prompts/output; the ambiguous-
+# unicode check (RUF001) would flag every Cyrillic letter that resembles a Latin one.
+"demo.py" = ["RUF001"]
+
 # --- Static typing (mypy, strict) --------------------------------------------
 
 [tool.mypy]

@@ -33,29 +33,34 @@ from omemo_content_factory.domain.output import OutputEvent
 from omemo_content_factory.domain.run import Actor, Run, RunEvent, RunFailed
 from omemo_content_factory.domain.task import TaskEvent, TaskFailed
 from omemo_content_factory.infrastructure.llm import AnthropicLLMClient, LLMTaskExecutor
-from omemo_content_factory.infrastructure.telegram import TelegramPublisher
+from omemo_content_factory.infrastructure.telegram import TelegramPublisher, TelegramReviewGateway
 
-DEFAULT_MODEL = "claude-sonnet-4-6"
-REQUIRED_ENV = ("ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
+DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+REQUIRED_ENV = (
+    "ANTHROPIC_API_KEY",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+    "TELEGRAM_REVIEWER_CHAT_ID",
+)
 
 BRIEF = (
-    "Topic: simple, evidence-based tips for better sleep. Audience: general adults. "
-    "Format: a short, friendly Telegram post."
+    "Тема: короткий астрологический пост на сегодня (общий настрой дня, лёгкий совет). "
+    "Аудитория: широкая. Формат: дружелюбный короткий пост для Telegram-канала на русском языке."
 )
 
 RESEARCH_PROMPT = (
-    "You are a health-content researcher for OMEMO Health. From the brief, list the key "
-    "evidence-based points and one caveat suitable for a SHORT social post. Be accurate and "
-    "non-alarmist; do not fabricate studies or statistics."
+    "Ты — ресёрчер контента. По брифу подготовь краткие тезисы для короткого астрологического "
+    "Telegram-поста на русском: ключевая идея дня, настроение, один практический совет. Пиши "
+    "по-русски. Тон лёгкий и доброжелательный, без категоричных предсказаний и без обещаний."
 )
 WRITER_PROMPT = (
-    "You are a social-media writer for OMEMO Health. From the research notes, write a SHORT, "
-    "friendly Telegram post (about 3-5 sentences) for a general audience. Keep it evidence-based, "
-    "non-alarmist and in plain language."
+    "Ты — автор соцсетей. По тезисам напиши короткий дружелюбный астрологический пост для "
+    "Telegram на русском (3–5 предложений). Лёгкий тон, без категоричных утверждений, можно "
+    "немного эмодзи."
 )
 EDITOR_PROMPT = (
-    "You are an editor for OMEMO Health. Polish the draft into the final Telegram post: concise, "
-    "warm and non-alarmist, ending with a one-line general disclaimer. Return only the post text."
+    "Ты — редактор. Доведи черновик до финального Telegram-поста на русском: коротко, тепло, "
+    "с короткой пометкой, что пост носит развлекательный характер. Верни только текст поста."
 )
 
 
@@ -124,15 +129,6 @@ def show_run(run: Run) -> None:
     safe_print(f"  Final Run status: {run.status.value.upper()}")
 
 
-def ask_approval() -> bool:
-    """Read the human's decision from the terminal; a non-interactive run declines (fail-closed)."""
-    try:
-        answer = input("Approve and publish this post to Telegram? [y/N] ").strip().lower()
-    except EOFError:
-        return False
-    return answer == "y"
-
-
 def main() -> None:
     """Auto-produce a Telegram post, pause for human approval, and publish only if approved."""
     missing = [name for name in REQUIRED_ENV if not os.environ.get(name)]
@@ -143,8 +139,15 @@ def main() -> None:
         safe_print("Set them and re-run, e.g. (PowerShell):")
         safe_print('  $env:ANTHROPIC_API_KEY = "sk-ant-..."')
         safe_print('  $env:TELEGRAM_BOT_TOKEN = "123456:ABC..."')
-        safe_print('  $env:TELEGRAM_CHAT_ID = "@your_channel_or_chat_id"')
+        safe_print('  $env:TELEGRAM_CHAT_ID = "@your_channel"          # куда публиковать')
+        safe_print('  $env:TELEGRAM_REVIEWER_CHAT_ID = "123456789"     # числовой id рецензента')
         safe_print(f"Optional: OMEMO_LLM_MODEL (default {DEFAULT_MODEL}).")
+        return
+
+    try:
+        reviewer_chat_id = int(os.environ["TELEGRAM_REVIEWER_CHAT_ID"])
+    except ValueError:
+        safe_print("TELEGRAM_REVIEWER_CHAT_ID must be a numeric Telegram user id.")
         return
 
     model = os.environ.get("OMEMO_LLM_MODEL", DEFAULT_MODEL)
@@ -155,13 +158,13 @@ def main() -> None:
         "editor@v1": LLMTaskExecutor(llm, EDITOR_PROMPT, "final-post@v1"),
     }
     director = ContentDirector(executors)
-    publisher = TelegramPublisher(
-        token=os.environ["TELEGRAM_BOT_TOKEN"], chat_id=os.environ["TELEGRAM_CHAT_ID"]
-    )
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    publisher = TelegramPublisher(token=token, chat_id=os.environ["TELEGRAM_CHAT_ID"])
+    gateway = TelegramReviewGateway(token=token, reviewer_chat_id=reviewer_chat_id)
 
     run = Run.create(
         run_id="run-telegram-001",
-        content_brief_ref="brief-sleep",
+        content_brief_ref="brief-astro",
         workflow_version_ref="telegram-post@v1",
     )
     tasks = [
@@ -183,21 +186,22 @@ def main() -> None:
 
     candidate = run.artifact(run.human_review(review_id).artifact_ref)
     safe_print("")
-    safe_print("CANDIDATE POST (awaiting your approval):")
+    safe_print("CANDIDATE POST:")
     safe_print("-" * 78)
     safe_print(candidate.content)
     safe_print("-" * 78)
+    safe_print("Sent to the reviewer in Telegram - waiting for the Approve/Reject tap...")
 
-    if ask_approval():
+    if gateway.request_approval(candidate.content):
         run.submit_review(review_id, ReviewStatus.APPROVED, by=Actor.HUMAN_REVIEWER)
         reference = director.publish_if_approved(run, review_id, publisher)
-        safe_print(f"Approved -> published to Telegram: {reference}")
+        safe_print(f"Approved -> published to the channel: {reference}")
     else:
         run.submit_review(
-            review_id, ReviewStatus.REJECTED, by=Actor.HUMAN_REVIEWER, reason="declined by reviewer"
+            review_id, ReviewStatus.REJECTED, by=Actor.HUMAN_REVIEWER, reason="rejected in Telegram"
         )
         director.publish_if_approved(run, review_id, publisher)
-        safe_print("Declined -> nothing was published.")
+        safe_print("Rejected -> nothing was published.")
 
     safe_print("")
     show_run(run)
