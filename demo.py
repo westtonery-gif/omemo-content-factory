@@ -1,16 +1,18 @@
-"""Demonstration: the first real AI run on the existing architecture.
+"""Demonstration: an auto-run Telegram-post pipeline with a human approval gate.
 
-Runs one Workflow — Research -> Writer -> Editor — through the real ``ContentDirector`` and the
-real Run/Task/Output/Artifact domain, with each role backed by a live Anthropic model behind the
-application's ``TaskExecutor`` port. The domain knows nothing of the model; the LLM lives only in
-the infrastructure layer.
+One Workflow — Research -> Writer -> Editor — runs **automatically** on a real Anthropic model
+to produce a short Telegram post, then **stops at the Approval Gate**. Production is automated;
+**publication is not**: the post is delivered to Telegram only after you explicitly approve it
+(PROJECT.md §1, §12). The domain knows nothing of the model or Telegram — both live in the
+infrastructure layer behind the ``TaskExecutor`` and ``Publisher`` ports.
 
-It shows, for the run: the Run status, each Task's status, each Task's Output, the Artifacts (with
-provenance ``Task -> Output -> Artifact``), the domain-event journal, and the final article.
+It shows: the Run/Task statuses, each Task's Output, the Artifacts (provenance
+``Task -> Output -> Artifact``), the candidate post, your decision, and the final Run status.
 
-Run with: ``python demo.py``. A real model call needs ``ANTHROPIC_API_KEY`` in the environment
-(optionally ``OMEMO_LLM_MODEL`` to choose the model); without a key the demo explains how to set
-it and exits cleanly. No QA, Human Review, publication or external integrations are involved.
+Run with: ``python demo.py``. Needs ``ANTHROPIC_API_KEY``, ``TELEGRAM_BOT_TOKEN`` and
+``TELEGRAM_CHAT_ID`` in the environment (optionally ``OMEMO_LLM_MODEL``); without them the demo
+explains what to set and exits. Approval is read from the terminal — a non-interactive run
+declines (fail-closed), so nothing is published by accident.
 """
 
 from __future__ import annotations
@@ -22,34 +24,38 @@ from collections.abc import Mapping
 from omemo_content_factory.application.content_director import ContentDirector, TaskRequest
 from omemo_content_factory.application.task_execution import TaskExecutor
 from omemo_content_factory.domain.artifact import ArtifactCreated, ArtifactEvent
+from omemo_content_factory.domain.human_review import (
+    HumanReviewEvent,
+    HumanReviewRejected,
+    ReviewStatus,
+)
 from omemo_content_factory.domain.output import OutputEvent
-from omemo_content_factory.domain.run import Run, RunEvent, RunFailed
+from omemo_content_factory.domain.run import Actor, Run, RunEvent, RunFailed
 from omemo_content_factory.domain.task import TaskEvent, TaskFailed
 from omemo_content_factory.infrastructure.llm import AnthropicLLMClient, LLMTaskExecutor
+from omemo_content_factory.infrastructure.telegram import TelegramPublisher
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
+REQUIRED_ENV = ("ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")
 
 BRIEF = (
-    "Topic: the health benefits of magnesium for a general adult audience. "
-    "Goal: a short, trustworthy, evidence-based article (~400-500 words) with a clear "
-    "structure and a calm, non-alarmist tone."
+    "Topic: simple, evidence-based tips for better sleep. Audience: general adults. "
+    "Format: a short, friendly Telegram post."
 )
 
 RESEARCH_PROMPT = (
-    "You are a meticulous health-content researcher for OMEMO Health. From the content brief, "
-    "produce concise, evidence-based research notes: key facts, a suggested article structure, "
-    "and any necessary medical caveats. Be accurate and non-alarmist. Do not fabricate studies "
-    "or statistics."
+    "You are a health-content researcher for OMEMO Health. From the brief, list the key "
+    "evidence-based points and one caveat suitable for a SHORT social post. Be accurate and "
+    "non-alarmist; do not fabricate studies or statistics."
 )
 WRITER_PROMPT = (
-    "You are a health-content writer for OMEMO Health. From the research notes, write a clear, "
-    "engaging article draft for a general audience, following the suggested structure. Keep every "
-    "claim evidence-based and non-alarmist. Include a brief, general medical disclaimer."
+    "You are a social-media writer for OMEMO Health. From the research notes, write a SHORT, "
+    "friendly Telegram post (about 3-5 sentences) for a general audience. Keep it evidence-based, "
+    "non-alarmist and in plain language."
 )
 EDITOR_PROMPT = (
-    "You are a health-content editor for OMEMO Health. From the article draft, produce the final "
-    "polished article: improve clarity, flow and accuracy, keep a calm non-alarmist tone, and "
-    "keep a brief medical disclaimer. Return only the final article text."
+    "You are an editor for OMEMO Health. Polish the draft into the final Telegram post: concise, "
+    "warm and non-alarmist, ending with a one-line general disclaimer. Return only the post text."
 )
 
 
@@ -65,11 +71,19 @@ def short(text: str, limit: int = 100) -> str:
     return flat if len(flat) <= limit else flat[:limit] + "..."
 
 
-def describe_event(event: RunEvent | TaskEvent | OutputEvent | ArtifactEvent) -> str:
+def describe_event(
+    event: RunEvent | TaskEvent | OutputEvent | ArtifactEvent | HumanReviewEvent,
+) -> str:
     """Render one domain event as a short human-readable line."""
     name = type(event).__name__
     if isinstance(event, ArtifactCreated):
         return f"{name}(artifact={event.artifact_id}, from_output={event.output_ref})"
+    if isinstance(event, ArtifactEvent):
+        return f"{name}(artifact={event.artifact_id})"
+    if isinstance(event, HumanReviewRejected):
+        return f"{name}(review={event.review_id}, reason={event.reason})"
+    if isinstance(event, HumanReviewEvent):
+        return f"{name}(review={event.review_id})"
     if isinstance(event, OutputEvent):
         return f"{name}(task={event.task_id}, output={event.output_id})"
     if isinstance(event, TaskFailed):
@@ -83,8 +97,7 @@ def describe_event(event: RunEvent | TaskEvent | OutputEvent | ArtifactEvent) ->
 
 def show_run(run: Run) -> None:
     """Print the Task results, Artifacts (with provenance), event journal and final status."""
-    safe_print(f"Run: {run.run_id}")
-    safe_print(f"  brief={run.content_brief_ref}, workflow={run.workflow_version_ref}")
+    safe_print(f"Run: {run.run_id}  ({run.content_brief_ref}, {run.workflow_version_ref})")
 
     safe_print("  Tasks:")
     for view in run.tasks:
@@ -94,22 +107,15 @@ def show_run(run: Run) -> None:
         columns = f"{view.workflow_step_ref:<10} {view.agent_ref:<14} {view.status.value:<10}"
         safe_print(f"    - {columns} ({detail})")
         if view.output is not None:
-            safe_print(f"        -> Output {view.output.output_id} [{view.output.status.value}]")
-            safe_print(f"           preview: {short(view.output.payload)}")
+            safe_print(f"        -> Output {view.output.output_id}: {short(view.output.payload)}")
 
     if run.artifacts:
-        origin = {
-            view.output.output_id: view.workflow_step_ref
-            for view in run.tasks
-            if view.output is not None
-        }
         safe_print("  Artifacts (provenance Task -> Output -> Artifact):")
         for artifact in run.artifacts:
-            step = origin.get(artifact.output_ref, "?")
             safe_print(
-                f"    - {artifact.artifact_id} [{artifact.status.value}] kind={artifact.kind}"
+                f"    - {artifact.artifact_id} [{artifact.status.value}]"
+                f" kind={artifact.kind} from_output={artifact.output_ref}"
             )
-            safe_print(f"        from: task {step} -> output {artifact.output_ref}")
 
     safe_print("  Event journal:")
     for index, event in enumerate(run.events, start=1):
@@ -118,55 +124,83 @@ def show_run(run: Run) -> None:
     safe_print(f"  Final Run status: {run.status.value.upper()}")
 
 
-def print_final_article(run: Run) -> None:
-    """Print the final article — the last Task's Output."""
-    final = run.tasks[-1].output if run.tasks else None
-    safe_print("")
-    safe_print("=" * 78)
-    safe_print("FINAL ARTICLE")
-    safe_print("=" * 78)
-    if final is None:
-        safe_print("(no final article — the run did not produce a final Output)")
-        return
-    safe_print(final.payload)
+def ask_approval() -> bool:
+    """Read the human's decision from the terminal; a non-interactive run declines (fail-closed)."""
+    try:
+        answer = input("Approve and publish this post to Telegram? [y/N] ").strip().lower()
+    except EOFError:
+        return False
+    return answer == "y"
 
 
 def main() -> None:
-    """Run the Research -> Writer -> Editor workflow on a real model and print the result."""
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        safe_print("ANTHROPIC_API_KEY is not set, so no real model can be called.")
-        safe_print("Set it and re-run, e.g.:")
-        safe_print('  PowerShell:  $env:ANTHROPIC_API_KEY = "sk-ant-..."')
-        safe_print("  bash:        export ANTHROPIC_API_KEY=sk-ant-...")
-        safe_print(f"Optionally set OMEMO_LLM_MODEL (default: {DEFAULT_MODEL}).")
+    """Auto-produce a Telegram post, pause for human approval, and publish only if approved."""
+    missing = [name for name in REQUIRED_ENV if not os.environ.get(name)]
+    if missing:
+        safe_print("Cannot run the real Telegram pipeline; missing environment variables:")
+        for name in missing:
+            safe_print(f"  - {name}")
+        safe_print("Set them and re-run, e.g. (PowerShell):")
+        safe_print('  $env:ANTHROPIC_API_KEY = "sk-ant-..."')
+        safe_print('  $env:TELEGRAM_BOT_TOKEN = "123456:ABC..."')
+        safe_print('  $env:TELEGRAM_CHAT_ID = "@your_channel_or_chat_id"')
+        safe_print(f"Optional: OMEMO_LLM_MODEL (default {DEFAULT_MODEL}).")
         return
 
     model = os.environ.get("OMEMO_LLM_MODEL", DEFAULT_MODEL)
-    client = AnthropicLLMClient(model=model)
+    llm = AnthropicLLMClient(model=model)
     executors: Mapping[str, TaskExecutor] = {
-        "researcher@v1": LLMTaskExecutor(client, RESEARCH_PROMPT, "research-notes@v1"),
-        "writer@v1": LLMTaskExecutor(client, WRITER_PROMPT, "article-draft@v1"),
-        "editor@v1": LLMTaskExecutor(client, EDITOR_PROMPT, "final-article@v1"),
+        "researcher@v1": LLMTaskExecutor(llm, RESEARCH_PROMPT, "research-notes@v1"),
+        "writer@v1": LLMTaskExecutor(llm, WRITER_PROMPT, "post-draft@v1"),
+        "editor@v1": LLMTaskExecutor(llm, EDITOR_PROMPT, "final-post@v1"),
     }
     director = ContentDirector(executors)
+    publisher = TelegramPublisher(
+        token=os.environ["TELEGRAM_BOT_TOKEN"], chat_id=os.environ["TELEGRAM_CHAT_ID"]
+    )
 
     run = Run.create(
-        run_id="run-magnesium-001",
-        content_brief_ref="brief-magnesium",
-        workflow_version_ref="health-article@v1",
+        run_id="run-telegram-001",
+        content_brief_ref="brief-sleep",
+        workflow_version_ref="telegram-post@v1",
     )
     tasks = [
         TaskRequest("research", "researcher@v1", BRIEF, artifact_kind="research-notes"),
-        TaskRequest("write", "writer@v1", "", artifact_kind="article-draft"),
-        TaskRequest("edit", "editor@v1", "", artifact_kind="final-article"),
+        TaskRequest("write", "writer@v1", "", artifact_kind="post-draft"),
+        TaskRequest("edit", "editor@v1", "", artifact_kind="final-post"),
     ]
 
     safe_print("=" * 78)
-    safe_print(f"First real AI run - Research -> Writer -> Editor on model {model}")
+    safe_print(
+        f"Auto-run: Research -> Writer -> Editor on {model} (publication needs your approval)"
+    )
     safe_print("=" * 78)
-    director.execute(run, tasks)
+    review_id = director.produce_for_review(run, tasks)
+    if review_id is None:
+        safe_print("Production failed before reaching the Approval Gate.")
+        show_run(run)
+        return
+
+    candidate = run.artifact(run.human_review(review_id).artifact_ref)
+    safe_print("")
+    safe_print("CANDIDATE POST (awaiting your approval):")
+    safe_print("-" * 78)
+    safe_print(candidate.content)
+    safe_print("-" * 78)
+
+    if ask_approval():
+        run.submit_review(review_id, ReviewStatus.APPROVED, by=Actor.HUMAN_REVIEWER)
+        reference = director.publish_if_approved(run, review_id, publisher)
+        safe_print(f"Approved -> published to Telegram: {reference}")
+    else:
+        run.submit_review(
+            review_id, ReviewStatus.REJECTED, by=Actor.HUMAN_REVIEWER, reason="declined by reviewer"
+        )
+        director.publish_if_approved(run, review_id, publisher)
+        safe_print("Declined -> nothing was published.")
+
+    safe_print("")
     show_run(run)
-    print_final_article(run)
 
 
 if __name__ == "__main__":
