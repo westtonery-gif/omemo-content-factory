@@ -33,10 +33,14 @@ SCHEMA_REF = "content-output@v1"
 PAYLOAD = "generated content"
 CD = Actor.CONTENT_DIRECTOR
 
-# Allowed Artifact transitions per ADR-0006 §4, restricted to the reachable source states.
+# Edges that do NOT raise InvalidArtifactTransitionError, per the reachable source states
+# (ADR-0006 §4 + ADR-0007 §6). ``CANDIDATE -> APPROVED`` is a valid edge but gated by an approving
+# Human Review (it raises ArtifactNotApprovedError, not InvalidArtifactTransitionError); it is
+# therefore excluded from the "structurally forbidden" set tested here and covered in
+# test_human_review.py.
 _ALLOWED_BY_SPEC: dict[ArtifactStatus, set[ArtifactStatus]] = {
     ArtifactStatus.DRAFT: {ArtifactStatus.CANDIDATE},
-    ArtifactStatus.CANDIDATE: set(),
+    ArtifactStatus.CANDIDATE: {ArtifactStatus.APPROVED, ArtifactStatus.REJECTED},
 }
 _FORBIDDEN_TRANSITIONS: list[tuple[ArtifactStatus, ArtifactStatus]] = [
     (source, target)

@@ -101,6 +101,14 @@ class DuplicateArtifactError(ArtifactDomainError):
     """A second Artifact was requested from an Output that already produced one (1:1)."""
 
 
+class ArtifactNotApprovedError(ArtifactDomainError):
+    """An Artifact was moved to ``APPROVED`` without an approving Human Review (ADR-0007 §6).
+
+    Enforces the invariant "no ``Published`` without ``Approve``" (DOMAIN_MODEL.md §6): the gate
+    is checked by the Run root before the transition; the Artifact entity stays unaware of reviews.
+    """
+
+
 class ImmutableArtifactAttributeError(ArtifactDomainError):
     """An attempt was made to change an immutable attribute of an Artifact (everything but status).
 
@@ -112,13 +120,13 @@ class ImmutableArtifactAttributeError(ArtifactDomainError):
 
 # --- Allowed transitions -----------------------------------------------------------------
 
-# Allowed Artifact status transitions (ADR-0006 §4). Only ``DRAFT -> CANDIDATE`` is wired now;
-# the other states have no outgoing edges yet (deferred — depend on excluded Human Review / QA /
-# versioning).
+# Allowed Artifact status transitions (ADR-0006 §4; extended by ADR-0007 §6 with the publication
+# path). ``CANDIDATE -> APPROVED`` is additionally gated by the Run (an approving Human Review must
+# exist). ``SUPERSEDED`` (versioning) stays deferred — no edges yet.
 _ALLOWED_ARTIFACT_TRANSITIONS: dict[ArtifactStatus, set[ArtifactStatus]] = {
     ArtifactStatus.DRAFT: {ArtifactStatus.CANDIDATE},
-    ArtifactStatus.CANDIDATE: set(),
-    ArtifactStatus.APPROVED: set(),
+    ArtifactStatus.CANDIDATE: {ArtifactStatus.APPROVED, ArtifactStatus.REJECTED},
+    ArtifactStatus.APPROVED: {ArtifactStatus.PUBLISHED},
     ArtifactStatus.REJECTED: set(),
     ArtifactStatus.SUPERSEDED: set(),
     ArtifactStatus.PUBLISHED: set(),

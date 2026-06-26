@@ -35,9 +35,20 @@ from omemo_content_factory.domain.artifact import (
     ArtifactCreated,
     ArtifactEvent,
     ArtifactId,
+    ArtifactNotApprovedError,
     ArtifactStatus,
     ArtifactView,
     DuplicateArtifactError,
+)
+from omemo_content_factory.domain.human_review import (
+    HumanReview,
+    HumanReviewApproved,
+    HumanReviewEvent,
+    HumanReviewRejected,
+    HumanReviewRequested,
+    HumanReviewView,
+    ReviewId,
+    ReviewStatus,
 )
 from omemo_content_factory.domain.output import (
     Output,
@@ -77,10 +88,13 @@ class Actor(Enum):
 
     Represents the existing rule "only the Content Director changes status"
     (RUN_SPEC.md §5, invariant 3). ``AGENT`` is an example of a non-authorised role.
+    ``HUMAN_REVIEWER`` is the human who decides a Human Review (ADR-0007 §2); it may submit a
+    review decision but not drive Run/Task/Output/Artifact state.
     """
 
     CONTENT_DIRECTOR = "content_director"
     AGENT = "agent"
+    HUMAN_REVIEWER = "human_reviewer"
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +250,8 @@ class Run:
         "_content_brief_ref",
         "_events",
         "_failure_reason",
+        "_human_reviews",
+        "_review_seq",
         "_rework_count",
         "_rework_policy",
         "_run_id",
@@ -252,11 +268,13 @@ class Run:
     _status: RunStatus
     _rework_count: int
     _failure_reason: str | None
-    _events: list[RunEvent | TaskEvent | OutputEvent | ArtifactEvent]
+    _events: list[RunEvent | TaskEvent | OutputEvent | ArtifactEvent | HumanReviewEvent]
     _tasks: dict[TaskId, Task]
     _task_seq: int
     _artifacts: dict[ArtifactId, Artifact]
     _artifact_seq: int
+    _human_reviews: dict[ReviewId, HumanReview]
+    _review_seq: int
 
     def __init__(
         self,
@@ -279,6 +297,8 @@ class Run:
         self._task_seq = 0
         self._artifacts = {}
         self._artifact_seq = 0
+        self._human_reviews = {}
+        self._review_seq = 0
 
     def __setattr__(self, name: str, value: object) -> None:
         """Reject reassignment of immutable attributes and their backing fields.
@@ -351,12 +371,14 @@ class Run:
         return self._failure_reason
 
     @property
-    def events(self) -> Sequence[RunEvent | TaskEvent | OutputEvent | ArtifactEvent]:
+    def events(
+        self,
+    ) -> Sequence[RunEvent | TaskEvent | OutputEvent | ArtifactEvent | HumanReviewEvent]:
         """Ordered, read-only sequence of events emitted since creation.
 
         Holds Run events (`EV-01`..`EV-05`), Task events (`TEV-01`..`TEV-06`, ADR-0004 §7),
-        Output events (`OutputValidated`, ADR-0005 §7) and Artifact events (`ArtifactCreated`,
-        ADR-0006 §8), in one Run log.
+        Output events (`OutputValidated`, ADR-0005 §7), Artifact events (`ArtifactCreated`,
+        ADR-0006 §8) and Human Review events (ADR-0007 §7), in one Run log.
         """
         return tuple(self._events)
 
@@ -500,12 +522,24 @@ class Run:
         return artifact_id
 
     def transition_artifact(self, artifact_id: ArtifactId, to: ArtifactStatus, by: Actor) -> None:
-        """Drive a guarded status transition of an owned Artifact through the root (ADR-0006 §6).
+        """Drive a guarded status transition of an owned Artifact through the root.
 
-        Authorised actor only; only the wired edge ``DRAFT -> CANDIDATE`` is allowed at this stage.
+        Authorised actor only (the Content Director). Edges: ``DRAFT -> CANDIDATE`` (ADR-0006);
+        ``CANDIDATE -> APPROVED`` / ``REJECTED`` and ``APPROVED -> PUBLISHED`` (ADR-0007 §6).
+        ``CANDIDATE -> APPROVED`` additionally requires an approving Human Review for this
+        Artifact, else ``ArtifactNotApprovedError`` — so ``PUBLISHED`` is unreachable without an
+        ``Approve`` (DOMAIN_MODEL.md §6).
         """
         self._ensure_authorised(by)
-        self._artifacts[artifact_id].apply_transition(to)
+        artifact = self._artifacts[artifact_id]
+        approving = (
+            to is ArtifactStatus.APPROVED and artifact.view.status is ArtifactStatus.CANDIDATE
+        )
+        if approving and not self._has_approved_review(artifact_id):
+            raise ArtifactNotApprovedError(
+                f"artifact {artifact_id} cannot be APPROVED without an approving Human Review"
+            )
+        artifact.apply_transition(to)
 
     @property
     def artifacts(self) -> Sequence[ArtifactView]:
@@ -528,6 +562,73 @@ class Run:
         """Enforce Output->Artifact 1:1 (ADR-0006 §5)."""
         if any(artifact.output_ref == output_id for artifact in self._artifacts.values()):
             raise DuplicateArtifactError(f"output {output_id} already has an Artifact")
+
+    # --- Human Review child management (additive, ADR-0007) ------------------------------
+
+    def open_human_review(self, artifact_id: ArtifactId, *, by: Actor) -> ReviewId:
+        """Open a ``PENDING`` Human Review on a candidate Artifact, through the root (ADR-0007 §5).
+
+        Content Director only. The target Artifact must be ``CANDIDATE`` (else
+        ``InvalidArtifactTransitionError``). Emits ``HumanReviewRequested`` and returns the id.
+        """
+        self._ensure_authorised(by)
+        status = self._artifacts[artifact_id].view.status
+        if status is not ArtifactStatus.CANDIDATE:
+            raise InvalidTransitionError(
+                f"a Human Review needs a CANDIDATE Artifact; {artifact_id} is {status}"
+            )
+        self._review_seq += 1
+        review_id = f"{self._run_id}-review-{self._review_seq}"
+        self._human_reviews[review_id] = HumanReview(
+            review_id=review_id, run_id=self._run_id, artifact_ref=artifact_id
+        )
+        self._record(
+            HumanReviewRequested(run_id=self._run_id, review_id=review_id, artifact_ref=artifact_id)
+        )
+        return review_id
+
+    def submit_review(
+        self, review_id: ReviewId, decision: ReviewStatus, *, by: Actor, reason: str | None = None
+    ) -> None:
+        """Record the human's decision on a review, through the root (ADR-0007 §5).
+
+        Human Reviewer only (not the Content Director). The review must be ``PENDING``. Emits
+        ``HumanReviewApproved`` / ``HumanReviewRejected`` (``CHANGES_REQUESTED`` emits no event).
+        """
+        self._ensure_reviewer(by)
+        review = self._human_reviews[review_id]
+        review.decide(decision, decided_by=by.value, reason=reason)
+        if decision is ReviewStatus.APPROVED:
+            self._record(
+                HumanReviewApproved(run_id=self._run_id, review_id=review_id, decided_by=by.value)
+            )
+        elif decision is ReviewStatus.REJECTED:
+            self._record(
+                HumanReviewRejected(
+                    run_id=self._run_id, review_id=review_id, decided_by=by.value, reason=reason
+                )
+            )
+
+    @property
+    def human_reviews(self) -> Sequence[HumanReviewView]:
+        """Read-only snapshots of the Human Reviews owned by this Run (ADR-0007 §5)."""
+        return tuple(review.view for review in self._human_reviews.values())
+
+    def human_review(self, review_id: ReviewId) -> HumanReviewView:
+        """Read-only snapshot of one owned Human Review (ADR-0007 §5)."""
+        return self._human_reviews[review_id].view
+
+    def _has_approved_review(self, artifact_id: ArtifactId) -> bool:
+        """Whether an ``APPROVED`` Human Review targets ``artifact_id`` (ADR-0007 §6)."""
+        return any(
+            review.artifact_ref == artifact_id and review.status is ReviewStatus.APPROVED
+            for review in self._human_reviews.values()
+        )
+
+    def _ensure_reviewer(self, by: Actor) -> None:
+        """Only the Human Reviewer may submit a review decision (ADR-0007 §2)."""
+        if by is not Actor.HUMAN_REVIEWER:
+            raise UnauthorizedActorError(f"{by} may not submit a Human Review decision")
 
     def _ensure_authorised(self, by: Actor) -> None:
         """Only the Content Director may change status (`FL-08`; `INV-03`)."""
@@ -573,6 +674,8 @@ class Run:
             return RunFailed(run_id=self._run_id, reason=reason)
         return None
 
-    def _record(self, event: RunEvent | TaskEvent | OutputEvent | ArtifactEvent) -> None:
-        """Append an emitted event (Run, Task, Output or Artifact) to the single history log."""
+    def _record(
+        self, event: RunEvent | TaskEvent | OutputEvent | ArtifactEvent | HumanReviewEvent
+    ) -> None:
+        """Append an emitted event (Run, Task, Output, Artifact or Human Review) to the log."""
         self._events.append(event)
