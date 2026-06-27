@@ -10,8 +10,8 @@ introduces no infrastructure (no LLM, network, adapters, queues), never bypasses
 aggregate root, and changes nothing in Run or Task.
 
 The work itself is delegated to an injected :class:`TaskExecutor` (a deterministic fake in
-tests and in the demo). The produced output is not persisted: the domain ``Output`` entity is
-deliberately out of scope at this stage, so a Task's domain-visible result is its status.
+tests and in the demo). When a Task succeeds with structured output, its ``Output`` is recorded
+through the Run and an ``Artifact`` is created from it (provenance ``Task -> Output -> Artifact``).
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 # ADR-0003: Run domain model interface contract
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-25
 - **Deciders:** Lead Architect / Domain Architect
 

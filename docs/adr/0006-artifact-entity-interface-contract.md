@@ -1,6 +1,6 @@
 # ADR-0006: Artifact entity — Run↔Artifact interface contract
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-26
 - **Deciders:** Lead Architect / Domain Architect
 

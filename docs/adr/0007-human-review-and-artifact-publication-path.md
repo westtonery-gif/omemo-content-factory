@@ -1,6 +1,6 @@
 # ADR-0007: Human Review entity + the Artifact approval/publication path
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-26
 - **Deciders:** Lead Architect / Domain Architect
 

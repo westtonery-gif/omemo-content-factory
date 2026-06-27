@@ -3,10 +3,11 @@
 Industrial multi-agent content production system for **OMEMO Health** — a
 managed, reproducible, human-in-the-loop pipeline for producing content.
 
-> **Status:** ROADMAP **Stage 1 — engineering foundation (Milestone M0)**.
-> The repository currently contains the project scaffold, configuration and
-> logging infrastructure, quality tooling and CI. No agents, skills, tools,
-> adapters, workflows or domain logic exist yet — those arrive in later stages.
+> **Status:** ROADMAP **Stage 2 — domain models & contracts**.
+> The domain core is implemented: the **Run** aggregate and its child entities
+> **Task, Output, Artifact** and **Human Review** (ADR-0003…0007), with a minimal
+> `ContentDirector` and an LLM-backed task executor. Full agents, skills, tools,
+> adapters and workflows arrive in later stages.
 
 ## Documentation (source of truth)
 
@@ -126,6 +127,21 @@ python -m omemo_content_factory
 
 It logs the version, the active environment and the log level.
 
+## Running the demo
+
+`demo.py` runs one workflow — Research → Writer → Editor — through the real
+`ContentDirector` and the Run/Task/Output/Artifact domain, with each role backed
+by a live Anthropic model behind the application's `TaskExecutor` port:
+
+```bash
+python demo.py
+```
+
+A real model call needs `ANTHROPIC_API_KEY` in the environment (optionally
+`OMEMO_LLM_MODEL` to choose the model); without a key the demo explains how to
+set it and exits cleanly. No QA, Human Review, publication or external
+integrations are involved.
+
 ## Project layout
 
 ```
@@ -152,7 +168,11 @@ omemo-content-factory/
 │       ├── __main__.py         # `python -m omemo_content_factory`
 │       ├── config.py           # Env-based infrastructure configuration
 │       ├── log.py              # Logging configuration helper
-│       └── py.typed            # PEP 561 typed marker
+│       ├── py.typed            # PEP 561 typed marker
+│       ├── domain/             # Domain core: Run, Task, Output, Artifact, Human Review
+│       ├── application/        # ContentDirector + task execution
+│       └── infrastructure/     # LLM-backed task executor
+├── demo.py                     # End-to-end demo of the domain via ContentDirector
 └── tests/                      # pytest suite
 ```
 

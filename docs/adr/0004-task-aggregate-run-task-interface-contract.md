@@ -1,6 +1,6 @@
 # ADR-0004: Task aggregate — Run↔Task interface contract
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-25
 - **Deciders:** Lead Architect / Domain Architect
 
