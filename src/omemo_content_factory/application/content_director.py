@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from omemo_content_factory.application.task_execution import TaskExecutor, execute_task
 from omemo_content_factory.domain.run import Actor, Run, RunStatus
 from omemo_content_factory.domain.task import TaskStatus
+from omemo_content_factory.domain.workflow import Workflow
 
 _CD = Actor.CONTENT_DIRECTOR
 
@@ -93,6 +94,35 @@ class ContentDirector:
             run.transition(RunStatus.COMPLETED, by=_CD)
         else:
             run.transition(RunStatus.FAILED, by=_CD, reason="one or more tasks failed")
+
+    def execute_workflow(self, run: Run, workflow: Workflow, *, brief: str) -> None:
+        """Resolve a Workflow into the Task sequence (strict list order) and run it (ADR-0009 §8).
+
+        Positional, list-order expansion only: no DAG, no scheduling, no optimisation, no use of
+        ``depends_on``. Data flow (output -> next input) and Schema resolution stay in the unchanged
+        execution core; the Workflow's ``schema_ref`` is declarative and is **not** threaded into
+        execution. Delegates to the existing ``execute`` without changing it.
+        """
+        self.execute(run, self.expand(workflow, brief=brief))
+
+    @staticmethod
+    def expand(workflow: Workflow, *, brief: str) -> list[TaskRequest]:
+        """Map ``Workflow.steps`` to a ``TaskRequest`` sequence in strict list order (ADR-0009 §8).
+
+        Deterministic positional mapping: the i-th step becomes the i-th ``TaskRequest``
+        (``workflow_step_ref`` = ``step_id``, role = ``agent_ref``). The first step receives the
+        ``brief``; later steps receive the previous step's Output via the existing pipeline's
+        chaining. ``depends_on``, ``task_type`` and ``schema_ref`` are declarative and are not used
+        here — no ordering, no execution semantics.
+        """
+        return [
+            TaskRequest(
+                workflow_step_ref=step.step_id,
+                agent_ref=step.agent_ref,
+                task_input=brief if index == 0 else "",
+            )
+            for index, step in enumerate(workflow.steps)
+        ]
 
     def _resolve(self, agent_ref: str) -> TaskExecutor:
         """Pick the executor for a role: the per-role mapping entry, or the single executor."""
