@@ -1,7 +1,8 @@
-"""Tests for the additive VALIDATED Output wiring (application/schema_validation.py).
+"""Tests for the unified Output finalization path (application/schema_validation.py).
 
-Exercises both outcomes through the real domain, without touching the legacy path: a valid result
-is recorded via the existing ``Run.record_output``; an invalid result is gated out (not recorded).
+Evaluation-ownership = Variant A: the app invokes ``Schema.validate``; ``Run.record_output`` is a
+pure sink that persists the verdict. A valid result is recorded VALID; an invalid result is now
+**recorded INVALID** (not gated out).
 """
 
 from __future__ import annotations
@@ -78,7 +79,7 @@ def test_valid_result_is_recorded_via_existing_record_output() -> None:
     assert output.payload == "the produced content"
 
 
-def test_invalid_result_is_gated_out_not_recorded() -> None:
+def test_invalid_result_is_recorded_as_invalid() -> None:
     run = _run()
     task_id = _succeeded_task(run)
     schema = _active_schema()
@@ -92,8 +93,11 @@ def test_invalid_result_is_gated_out_not_recorded() -> None:
         schema_ref="research-notes@1",
     )
 
-    assert output_id is None
-    assert run.task(task_id).output is None
+    assert output_id is not None
+    output = run.task(task_id).output
+    assert output is not None
+    assert output.status is OutputStatus.INVALID  # recorded, not gated out
+    assert output.payload == "the produced content"
 
 
 def test_resolve_active_schema_maps_ref_to_schema() -> None:

@@ -3,7 +3,9 @@
 These bind only to the public contract (``execute`` -> ``ExecutionResult``) and inject a
 deterministic fake ``LLMClient`` — no SDK, no network, no API key. The real ``AnthropicLLMClient``
 is a thin adapter exercised by the demo, not unit-tested with mocks. End to end, the executor is
-driven through the Run aggregate root so a real model result becomes an Output/Artifact.
+driven through the Run aggregate root; under the validated finalization (3D) it does not yet emit
+structured ``payload_fields``, so the pipeline runs to COMPLETED without recording an Output (a
+follow-up infra slice adds structured model output).
 """
 
 from __future__ import annotations
@@ -74,7 +76,12 @@ def test_model_failure_becomes_a_managed_failed_result() -> None:
 
 
 def test_three_role_pipeline_runs_end_to_end_through_the_root() -> None:
-    """Research -> Writer -> Editor with per-role executors yields a COMPLETED Run with Outputs."""
+    """Research -> Writer -> Editor with per-role LLM executors yields a COMPLETED Run.
+
+    Under the validated finalization (3D, Variant A) the LLM executor does not yet emit structured
+    ``payload_fields``, so no Output is recorded (structured model output is a follow-up infra
+    slice). The pipeline still runs deterministically: every Task SUCCEEDED and the Run COMPLETED.
+    """
     executors = {
         "researcher@v1": LLMTaskExecutor(EchoLLMClient("research"), "research", "notes@v1"),
         "writer@v1": LLMTaskExecutor(EchoLLMClient("write"), "write", "draft@v1"),
@@ -94,7 +101,7 @@ def test_three_role_pipeline_runs_end_to_end_through_the_root() -> None:
     )
     assert run.status is RunStatus.COMPLETED
     assert [view.status for view in run.tasks] == [TaskStatus.SUCCEEDED] * 3
-    # Chaining: each role consumes the previous role's Output.
-    payloads = [view.output.payload for view in run.tasks if view.output is not None]
-    assert payloads == ["research:BRIEF", "write:research:BRIEF", "edit:write:research:BRIEF"]
-    assert len(run.artifacts) == 3
+    # Option A: no structured payload_fields from the LLM executor yet -> no validated Output,
+    # hence no Artifact (structured output is a separate follow-up infra slice).
+    assert all(view.output is None for view in run.tasks)
+    assert len(run.artifacts) == 0

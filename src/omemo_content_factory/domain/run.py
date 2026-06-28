@@ -456,14 +456,20 @@ class Run:
             self._record(event)
 
     def record_output(
-        self, task_id: TaskId, *, payload: str, schema_ref: str, by: Actor
+        self, task_id: TaskId, *, payload: str, schema_ref: str, by: Actor, valid: bool = True
     ) -> OutputId:
-        """Record the immutable Output of a succeeded Task, through the root (ADR-0005 §5).
+        """Persist the immutable Output of a succeeded Task, through the root (ADR-0005 §5).
 
-        Authorised actor only (the Content Director). The Task must be ``SUCCEEDED`` (Output
-        exists only for a successful Task) and must not already have one (1:1) — both enforced
-        by the Task. Creates a ``VALID`` Output, attaches it, emits ``OutputValidated`` in the
-        Run's event log, and returns the new Output's id.
+        **Pure execution sink** (evaluation-ownership model = Variant A): Run only *persists* the
+        given verdict — it does **not** import Schema and does **not** decide validity. The
+        VALID/INVALID decision is owned by the Schema authority (``Schema.validate``), invoked in
+        the application layer, which passes the outcome here as ``valid``.
+
+        Authorised actor only (the Content Director). The Task must be ``SUCCEEDED`` and must not
+        already have an Output (1:1) — both enforced by the Task. Records the Output ``VALID`` when
+        ``valid`` (default — legacy behaviour) else ``INVALID``; emits ``OutputValidated`` only for
+        a valid result (an INVALID outcome emits no dedicated event, ADR-0008 §9). Returns the new
+        Output's id.
         """
         self._ensure_authorised(by)
         task = self._tasks[task_id]
@@ -473,10 +479,11 @@ class Run:
             task_id=task_id,
             schema_ref=schema_ref,
             payload=payload,
-            status=OutputStatus.VALID,
+            status=OutputStatus.VALID if valid else OutputStatus.INVALID,
         )
         task.attach_output(output)
-        self._record(OutputValidated(run_id=self._run_id, task_id=task_id, output_id=output_id))
+        if valid:
+            self._record(OutputValidated(run_id=self._run_id, task_id=task_id, output_id=output_id))
         return output_id
 
     @property

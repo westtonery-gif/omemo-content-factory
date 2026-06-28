@@ -21,7 +21,18 @@ from omemo_content_factory.domain.artifact import (
     InvalidArtifactTransitionError,
 )
 from omemo_content_factory.domain.run import Actor, Run, RunStatus, UnauthorizedActorError
+from omemo_content_factory.domain.schema import Schema, SchemaStatus, SchemaVersion
 from omemo_content_factory.domain.task import TaskStatus
+
+
+def _open_schema() -> Schema:
+    """An ACTIVE Schema with no required fields — any result validates VALID (for wiring tests)."""
+    schema = Schema.create(
+        schema_id="s", version=SchemaVersion(1), description="d", required_fields=[]
+    )
+    schema.transition(SchemaStatus.ACTIVE)
+    return schema
+
 
 RUN_ID = "run-art-0001"
 BRIEF_REF = "brief-0001"
@@ -55,7 +66,9 @@ class OutputtingExecutor:
     """Deterministic executor that always succeeds with an output and a schema_ref."""
 
     def execute(self, task_input: str) -> ExecutionResult:
-        return ExecutionResult(succeeded=True, output=f"[gen] {task_input}", schema_ref="s@v1")
+        return ExecutionResult(
+            succeeded=True, output=f"[gen] {task_input}", schema_ref="s@v1", payload_fields={}
+        )
 
 
 def make_run() -> Run:
@@ -178,7 +191,8 @@ def test_only_content_director_can_transition_an_artifact() -> None:
 
 def test_workflow_creates_one_artifact_per_output_with_provenance() -> None:
     """A full workflow yields one Artifact per produced Output, each tracing back to its Output."""
-    director = ContentDirector(OutputtingExecutor())
+    schemas = {"writer@v1": _open_schema(), "editor@v1": _open_schema()}
+    director = ContentDirector(OutputtingExecutor(), schemas)
     run = Run.create(
         run_id="run-art-wf", content_brief_ref=BRIEF_REF, workflow_version_ref=WORKFLOW_REF
     )

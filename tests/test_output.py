@@ -20,7 +20,17 @@ from omemo_content_factory.domain.output import (
     OutputValidated,
 )
 from omemo_content_factory.domain.run import Actor, Run, UnauthorizedActorError
+from omemo_content_factory.domain.schema import Schema, SchemaStatus, SchemaVersion
 from omemo_content_factory.domain.task import TaskStatus
+
+
+def _active_schema(required: tuple[str, ...] = ("body",)) -> Schema:
+    schema = Schema.create(
+        schema_id="draft", version=SchemaVersion(1), description="d", required_fields=list(required)
+    )
+    schema.transition(SchemaStatus.ACTIVE)
+    return schema
+
 
 RUN_ID = "run-out-0001"
 BRIEF_REF = "brief-0001"
@@ -99,6 +109,23 @@ def test_record_output_emits_output_validated_in_the_run_log() -> None:
     assert last.output_id == output_id
 
 
+# --- Pure sink: persists the given verdict (3C, Variant A) -------------------------------
+
+
+def test_record_output_persists_invalid_when_marked_not_valid() -> None:
+    """The sink persists the provided verdict: valid=False -> INVALID, with no OutputValidated."""
+    run = make_run()
+    task_id = succeeded_task(run)
+    output_id = run.record_output(
+        task_id, payload=PAYLOAD, schema_ref=SCHEMA_REF, by=CD, valid=False
+    )
+    output = run.task(task_id).output
+    assert output is not None
+    assert output.output_id == output_id
+    assert output.status is OutputStatus.INVALID
+    assert not any(isinstance(event, OutputValidated) for event in run.events)
+
+
 # --- Guards ------------------------------------------------------------------------------
 
 
@@ -136,14 +163,21 @@ def test_only_content_director_can_record_an_output() -> None:
 # --- Through the application slice --------------------------------------------------------
 
 
-def test_execute_task_records_an_output_when_result_carries_payload_and_schema() -> None:
-    """A successful execution with output + schema_ref records the Task's Output via the root."""
+def test_execute_task_records_validated_output_with_schema_and_payload_fields() -> None:
+    """3D: a success with schema + structured fields records the Output via the validated path."""
     run = make_run()
     executor = StaticTaskExecutor(
-        ExecutionResult(succeeded=True, output="draft v1", schema_ref="draft@v1")
+        ExecutionResult(
+            succeeded=True, output="draft v1", schema_ref="draft@v1", payload_fields={"body": "x"}
+        )
     )
     task_id = execute_task(
-        run, executor, workflow_step_ref=STEP_REF, agent_ref=AGENT_REF, task_input=TASK_INPUT
+        run,
+        executor,
+        workflow_step_ref=STEP_REF,
+        agent_ref=AGENT_REF,
+        task_input=TASK_INPUT,
+        schema=_active_schema(),
     )
     output = run.task(task_id).output
     assert output is not None
@@ -152,10 +186,31 @@ def test_execute_task_records_an_output_when_result_carries_payload_and_schema()
     assert output.status is OutputStatus.VALID
 
 
-def test_execute_task_records_no_output_without_a_schema_ref() -> None:
-    """Backward-compatible: a success carrying only ``output`` records no Output (ADR-0005 §10)."""
+def test_execute_task_records_invalid_output_when_required_fields_missing() -> None:
+    """3D: missing a required field -> the Output is recorded INVALID (Schema decides)."""
     run = make_run()
-    executor = StaticTaskExecutor(ExecutionResult(succeeded=True, output="draft v1"))
+    executor = StaticTaskExecutor(
+        ExecutionResult(succeeded=True, output="draft v1", schema_ref="draft@v1", payload_fields={})
+    )
+    task_id = execute_task(
+        run,
+        executor,
+        workflow_step_ref=STEP_REF,
+        agent_ref=AGENT_REF,
+        task_input=TASK_INPUT,
+        schema=_active_schema(),
+    )
+    output = run.task(task_id).output
+    assert output is not None
+    assert output.status is OutputStatus.INVALID
+
+
+def test_execute_task_records_no_output_without_a_schema() -> None:
+    """3D: no schema (or no structured fields) -> no Output; there is no always-VALID fallback."""
+    run = make_run()
+    executor = StaticTaskExecutor(
+        ExecutionResult(succeeded=True, output="draft v1", schema_ref="draft@v1")
+    )
     task_id = execute_task(
         run, executor, workflow_step_ref=STEP_REF, agent_ref=AGENT_REF, task_input=TASK_INPUT
     )

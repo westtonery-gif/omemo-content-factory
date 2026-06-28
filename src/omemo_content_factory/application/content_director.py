@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 from omemo_content_factory.application.task_execution import TaskExecutor, execute_task
 from omemo_content_factory.domain.run import Actor, Run, RunStatus
+from omemo_content_factory.domain.schema import Schema
 from omemo_content_factory.domain.task import TaskStatus
 from omemo_content_factory.domain.workflow import Workflow
 
@@ -53,8 +54,13 @@ class ContentDirector:
     themselves are unaware of one another; the role's prompt lives inside its executor, not here.
     """
 
-    def __init__(self, executor: TaskExecutor | Mapping[str, TaskExecutor]) -> None:
+    def __init__(
+        self,
+        executor: TaskExecutor | Mapping[str, TaskExecutor],
+        schemas: Mapping[str, Schema] | None = None,
+    ) -> None:
         self._executor = executor
+        self._schemas = schemas
 
     def execute(self, run: Run, tasks: Sequence[TaskRequest]) -> None:
         """Orchestrate an **already-created** Run through its full lifecycle.
@@ -83,6 +89,7 @@ class ContentDirector:
                 workflow_step_ref=request.workflow_step_ref,
                 agent_ref=request.agent_ref,
                 task_input=task_input,
+                schema=self._resolve_schema(request.agent_ref),
             )
             output = run.task(task_id).output
             if output is not None:
@@ -130,6 +137,16 @@ class ContentDirector:
         if isinstance(executor, Mapping):
             return executor[agent_ref]
         return executor
+
+    def _resolve_schema(self, agent_ref: str) -> Schema | None:
+        """Select the role's Schema from the injected map (selection only; ADR-0013 §8).
+
+        Returns ``None`` when no schema map is wired — then ``execute_task`` records no Output (the
+        validated finalization is the only path; there is no always-VALID fallback).
+        """
+        if self._schemas is None:
+            return None
+        return self._schemas.get(agent_ref)
 
     @staticmethod
     def _all_tasks_succeeded(run: Run) -> bool:

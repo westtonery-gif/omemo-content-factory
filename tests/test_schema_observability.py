@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from omemo_content_factory.application.schema_observability import InMemoryValidationLog
 from omemo_content_factory.application.schema_validation import validate_and_record_output
+from omemo_content_factory.domain.output import OutputStatus
 from omemo_content_factory.domain.run import Actor, Run
 from omemo_content_factory.domain.schema import Schema, SchemaStatus, SchemaVersion
 from omemo_content_factory.domain.task import TaskId, TaskStatus
@@ -63,7 +64,7 @@ def test_valid_decision_is_traced() -> None:
     assert event.timestamp and event.payload_signature
 
 
-def test_invalid_decision_is_traced_but_not_recorded() -> None:
+def test_invalid_decision_is_traced_and_recorded_invalid() -> None:
     run, schema, log = _run(), _active_schema(), InMemoryValidationLog()
     task_id = _succeeded_task(run)
 
@@ -77,8 +78,9 @@ def test_invalid_decision_is_traced_but_not_recorded() -> None:
         observer=log,
     )
 
-    assert output_id is None  # gated out, behaviour unchanged
-    assert run.task(task_id).output is None
+    assert output_id is not None
+    output = run.task(task_id).output
+    assert output is not None and output.status is OutputStatus.INVALID  # recorded, not gated
     assert len(log.events) == 1
     assert log.events[0].is_valid is False
     assert log.events[0].missing_fields == ("structure",)

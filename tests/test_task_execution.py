@@ -106,6 +106,32 @@ def test_full_slice_create_run_execute_task_complete_run() -> None:
     assert run.status is RunStatus.COMPLETED
 
 
+# --- 3B: ExecutionResult.payload_fields (data-only; not consumed by execution yet) -------
+
+
+def test_execution_result_payload_fields_defaults_to_none() -> None:
+    assert ExecutionResult(succeeded=True, output="x").payload_fields is None
+
+
+def test_execution_result_carries_payload_fields() -> None:
+    result = ExecutionResult(
+        succeeded=True, output="x", schema_ref="s@1", payload_fields={"facts": "a"}
+    )
+    assert result.payload_fields == {"facts": "a"}
+
+
+def test_payload_fields_without_schema_record_no_output() -> None:
+    """3D: Output is recorded only via the validated path (needs a Schema); fields alone -> none."""
+    run = make_running_run()
+    result = ExecutionResult(
+        succeeded=True, output="draft", schema_ref="s@1", payload_fields={"facts": "a"}
+    )
+    task_id = run_one_task(run, StaticTaskExecutor(result))
+    view = run.task(task_id)
+    assert view.status is TaskStatus.SUCCEEDED
+    assert view.output is None  # no schema supplied -> no validated Output (no always-VALID path)
+
+
 def test_full_slice_records_run_and_task_events_in_one_ordered_log() -> None:
     """The whole flow is traced once, in order, in the Run's single event log."""
     run = make_running_run()

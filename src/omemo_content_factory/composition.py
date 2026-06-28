@@ -1,0 +1,147 @@
+"""Composition Root — a pure build-time graph compiler (the outermost wiring layer).
+
+Per `ADR-0012` / `ADR-0013`: this is the **only** place that resolves `agent_ref → Agent →
+prompt_ref → Prompt` and assembles the runtime graph. It is a **dumb, deterministic, build-time**
+compiler:
+
+- **constructs** the `agent_ref → TaskExecutor` mapping,
+- **injects** a Prompt into its executor **at construction time** (`Prompt.system → system_prompt`,
+  `Prompt.schema_ref → schema_ref`; `user_template` handling is deferred so the executor is left
+  unchanged),
+- **checks structural existence** (build-time only): ``prompt_ref`` and ``Workflow.agent_ref``
+  resolve to existing entries — a pure key-presence check, **not** workflow-semantics or policy.
+
+It contains **no execution semantics**: it never runs a Task, never simulates runtime, makes no
+runtime decisions, and never interprets Workflow/execution state. It is **not a policy layer**:
+workflow-semantics, business-level correctness and domain consistency stay at the domain/
+application boundary, never here. All failures are **build-time** (`CompositionError`). Being the
+outermost layer it may import domain/application/infrastructure; nothing imports it (dependencies
+point inward, `PROJECT.md` §7).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping
+
+from omemo_content_factory.application.content_director import ContentDirector
+from omemo_content_factory.application.task_execution import TaskExecutor
+from omemo_content_factory.domain.agent import Agent
+from omemo_content_factory.domain.prompt import Prompt, PromptId
+from omemo_content_factory.domain.schema import Schema
+from omemo_content_factory.domain.workflow import Workflow
+from omemo_content_factory.infrastructure.llm import LLMClient, LLMTaskExecutor
+
+
+class CompositionError(Exception):
+    """A build-time composition-invariant violation (never raised at runtime)."""
+
+
+def build_executor_map(
+    agents: Iterable[Agent],
+    prompts: Mapping[PromptId, Prompt],
+    client: LLMClient,
+) -> dict[str, TaskExecutor]:
+    """Compile the `agent_ref → TaskExecutor` mapping from the static catalogues (build-time).
+
+    Deterministic, uniform construction: each Agent's `prompt_ref` is resolved to a Prompt and that
+    Prompt is injected into a freshly constructed executor, keyed by the Agent's `agent_id`. No Task
+    is run and the model is not called here. Build-time consistency is enforced: a duplicate
+    `agent_ref` or an unknown `prompt_ref` raises ``CompositionError``.
+    """
+    executors: dict[str, TaskExecutor] = {}
+    for agent in agents:
+        if agent.agent_id in executors:
+            raise CompositionError(f"duplicate agent_ref '{agent.agent_id}'")
+        prompt = prompts.get(agent.prompt_ref)
+        if prompt is None:
+            raise CompositionError(
+                f"agent '{agent.agent_id}' references unknown prompt '{agent.prompt_ref}'"
+            )
+        executors[agent.agent_id] = LLMTaskExecutor(
+            client=client, system_prompt=prompt.system, schema_ref=prompt.schema_ref
+        )
+    return executors
+
+
+def build_schema_map(
+    agents: Iterable[Agent],
+    prompts: Mapping[PromptId, Prompt],
+    schemas: Mapping[str, Schema],
+) -> dict[str, Schema]:
+    """Compile the `agent_ref → Schema` map from the catalogues (build-time, structural only).
+
+    Resolves `agent.prompt_ref → Prompt → prompt.schema_ref → Schema` as pure key-presence lookups
+    (duplicate `agent_ref` / unknown `prompt_ref` / unknown `schema_ref` → ``CompositionError``).
+    It does **not** validate anything, run a Task, or interpret Schema/Workflow semantics — and this
+    map is **not** yet used by execution (wiring is a later sub-slice). Composition-Root scope only
+    (`ADR-0012`): structural existence check, no policy.
+    """
+    result: dict[str, Schema] = {}
+    for agent in agents:
+        if agent.agent_id in result:
+            raise CompositionError(f"duplicate agent_ref '{agent.agent_id}'")
+        prompt = prompts.get(agent.prompt_ref)
+        if prompt is None:
+            raise CompositionError(
+                f"agent '{agent.agent_id}' references unknown prompt '{agent.prompt_ref}'"
+            )
+        schema = schemas.get(prompt.schema_ref)
+        if schema is None:
+            raise CompositionError(
+                f"prompt '{prompt.prompt_id}' references unknown schema '{prompt.schema_ref}'"
+            )
+        result[agent.agent_id] = schema
+    return result
+
+
+def build_content_director(
+    agents: Iterable[Agent],
+    prompts: Mapping[PromptId, Prompt],
+    client: LLMClient,
+    schemas: Mapping[str, Schema] | None = None,
+) -> ContentDirector:
+    """Compile the executor (and optional schema) maps and hand them to a ``ContentDirector``.
+
+    The Content Director only *selects* from the assembled maps at runtime (`ADR-0013` §8); it
+    never builds them. When ``schemas`` is supplied, an `agent_ref → Schema` map is built (3A) so
+    execution finalizes Output through the validated path; without it, no Output is produced (no
+    always-VALID fallback).
+    """
+    schema_map = build_schema_map(agents, prompts, schemas) if schemas is not None else None
+    return ContentDirector(build_executor_map(agents, prompts, client), schema_map)
+
+
+def validate_workflow_executors(workflow: Workflow, executors: Mapping[str, TaskExecutor]) -> None:
+    """Build-time **structural existence check**: every ``Workflow.agent_ref`` is a key in the map.
+
+    A pure key-presence check — it does **not** interpret Workflow semantics (ordering,
+    ``depends_on``, step meaning) and is **not** a policy/rules check. It only ensures selection
+    will not raise a runtime ``KeyError``: an unknown ``agent_ref`` raises ``CompositionError``
+    here, **before any Run executes**. Composition-Root scope only (`ADR-0012`); CD/runtime
+    unchanged. Semantic / business-level checks belong to the domain/application boundary, not here.
+    """
+    missing = sorted({s.agent_ref for s in workflow.steps if s.agent_ref not in executors})
+    if missing:
+        raise CompositionError(
+            f"workflow '{workflow.workflow_id}' references unknown agent_ref(s): {missing}"
+        )
+
+
+def compile_runtime(
+    agents: Iterable[Agent],
+    prompts: Mapping[PromptId, Prompt],
+    client: LLMClient,
+    workflow: Workflow,
+    schemas: Mapping[str, Schema] | None = None,
+) -> ContentDirector:
+    """Build executor (+optional schema) maps, structurally check vs ``workflow``, wire the CD.
+
+    Build-time graph construction for a given Workflow: a structural existence check (no
+    workflow-semantics, no policy) catches an unknown ``agent_ref`` as a ``CompositionError`` here,
+    so selection never raises at runtime. When ``schemas`` is supplied, an `agent_ref → Schema` map
+    is built so execution finalizes Output through the validated path (3D).
+    """
+    executors = build_executor_map(agents, prompts, client)
+    validate_workflow_executors(workflow, executors)
+    schema_map = build_schema_map(agents, prompts, schemas) if schemas is not None else None
+    return ContentDirector(executors, schema_map)

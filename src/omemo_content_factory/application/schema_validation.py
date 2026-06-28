@@ -1,17 +1,10 @@
-"""Additive wiring — the VALIDATED Output path layered beside the untouched legacy path.
+"""Unified Output finalization path — application-layer invocation of the Schema authority.
 
-Application layer only. It resolves the ACTIVE Schema for a ref, runs the pure
-``Schema.validate``, and records the Task's Output through the **existing** ``Run.record_output``
-**only when the result is valid**. Nothing in the domain (Run, Output, Schema), nor
-``TaskExecutor``/``ExecutionResult``/``ContentDirector``, is changed.
-
-Schema stays a pure validator here: it does not know Run, Output or the Content Director — this
-module calls it, not the other way round.
-
-Note on the gate: ``Run.record_output`` fixes a ``VALID`` Output and takes no status (the Run
-contract is unchanged). So an **invalid** result is *gated out* — not recorded — rather than
-recorded as an ``INVALID`` Output. Recording an ``INVALID`` Output would change the Run contract
-and is out of scope for this wiring.
+Evaluation-ownership model = **Variant A** (roles strictly split): **Schema decides** (the
+authority owns the VALID/INVALID rule in ``Schema.validate``); **the application invokes** it here
+(resolving/using a pre-bound ACTIVE Schema), obtaining a verdict; **Run persists** the verdict as a
+**pure sink** (``Run.record_output``), which neither knows Schema nor decides. An INVALID result is
+now **recorded** (Output ``INVALID``), not gated out.
 """
 
 from __future__ import annotations
@@ -48,20 +41,20 @@ def validate_and_record_output(
     schema_ref: str,
     by: Actor = Actor.CONTENT_DIRECTOR,
     observer: ValidationObserver | None = None,
-) -> OutputId | None:
-    """VALIDATED path (add-on): validate, then record only when valid.
+) -> OutputId:
+    """Unified finalization: **invoke** the Schema authority, then **persist** the verdict.
 
-    Calls the pure ``schema.validate`` (the single place Schema is invoked). On a valid verdict it
-    records the Output through the **existing** ``Run.record_output`` and returns its id; on an
-    invalid verdict nothing is recorded (the result is gated out) and ``None`` is returned. The
-    owning Task must already be ``SUCCEEDED`` (precondition of ``Run.record_output``), exactly as on
-    the legacy path. Run, Output and the legacy path are untouched.
+    The application invokes the pure ``schema.validate`` (the Schema authority decides), then hands
+    the outcome to the **pure sink** ``Run.record_output`` (``valid=verdict.is_valid``) to persist.
+    Run does not evaluate. The Output is **recorded** as VALID or INVALID per the verdict (an
+    INVALID result is recorded, not gated out); the recorded Output's id is returned. The owning
+    Task must already be ``SUCCEEDED`` (precondition of ``Run.record_output``).
 
     The optional ``observer`` receives a log-only trace of the decision (VALID/INVALID); it never
-    affects the outcome (best-effort dispatch). With no observer the behaviour is unchanged.
+    affects the outcome (best-effort dispatch).
     """
     verdict = schema.validate(payload_fields)
     record_validation(observer, schema, verdict, payload_fields)
-    if not verdict.is_valid:
-        return None
-    return run.record_output(task_id, payload=payload, schema_ref=schema_ref, by=by)
+    return run.record_output(
+        task_id, payload=payload, schema_ref=schema_ref, by=by, valid=verdict.is_valid
+    )
