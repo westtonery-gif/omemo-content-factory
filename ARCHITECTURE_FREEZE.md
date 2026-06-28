@@ -1,137 +1,165 @@
-# ARCHITECTURE_FREEZE.md — Заморозка минимальной архитектуры
+# ARCHITECTURE_FREEZE.md — Заморозка архитектуры (baseline)
 
 > **Место в иерархии документации (PROJECT.md, раздел 17).**
 > `PROJECT.md` → `ARCHITECTURE.md` → `ROADMAP.md` → `DOMAIN_MODEL.md` → `*_SPEC` / `*_ACCEPTANCE` →
 > `ADR` → **`ARCHITECTURE_FREEZE.md`** (отметка состояния) → `Implementation (Code)`.
 >
-> Этот документ **не вводит новой функциональности, сущностей, слоёв или инвариантов**. Он
-> **фиксирует фактически реализованное состояние** системы как стабильную минимальную
-> архитектурную границу (baseline). Источник истины остаётся прежним: `PROJECT.md` → `ARCHITECTURE.md`.
-> Любое расхождение исправляется в пользу вышестоящих документов.
+> Этот документ **фиксирует фактически реализованное состояние** системы как стабильную
+> архитектурную границу (baseline). Он не вводит новой функциональности — только отмечает текущее
+> состояние. Источник истины остаётся прежним: `PROJECT.md` → `ARCHITECTURE.md`. Любое расхождение
+> исправляется в пользу вышестоящих документов.
 
-**Версия документа:** 1.0
+**Версия документа:** 1.1 (Revision 2 — **post-3A re-freeze**)
 **Статус:** Принят (архитектурный baseline — заморозка)
-**Дата:** 2026-06-27
-**Состояние системы:** **System is in stable minimal architecture state.**
+**Дата:** 2026-06-28
+**Состояние системы:** **System is in a stable architecture state (post-3A baseline).**
+
+> **Журнал ревизий.**
+> - **1.0** — минимальное ядро (Run / Task / Output / Artifact / Human Review, Schema,
+>   observability-слой).
+> - **1.1 (Revision 2)** — re-freeze после внедрения декларативного и wiring-слоёв и сущности-
+>   дескрипторов: добавлены **Workflow** (ADR-0009), **Agent/Prompt** (ADR-0010/0011),
+>   **Composition Root** (ADR-0012) и **Execution Topology + Authority** (ADR-0013); зафиксирован
+>   Schema-resolution map (3A, построен, **не подключён** к исполнению). Инварианты переформулированы
+>   под новую архитектуру. Поведение исполнения не изменено (transitional enforcement сохранён).
 
 ---
 
 ## 0. Назначение и сфера заморозки
 
-- **Назначение.** Объявить текущую систему **завершённой минимальной архитектурой**: всё, что
-  реализовано, зафиксировано как baseline; всё, что не реализовано, требует **нового ADR** для
-  ввода (раздел 3).
-- **Что замораживается.** Доменное ядро (Run / Task / Output / Artifact / Human Review), сущность
-  **Schema** (ADR-0008) и **observability-слой** (лог решений валидации).
-- **Чего документ НЕ делает.** Не меняет поведение, не добавляет код, не вводит сущности, не
-  меняет ADR. Это **отметка состояния**, а не архитектурное решение.
+- **Назначение.** Зафиксировать текущую систему как стабильную архитектурную точку; всё, что **не**
+  реализовано, вводится только через `ADR → SPEC/ACCEPTANCE → реализация` (раздел 3).
+- **Что входит в baseline (реализовано).** Доменное ядро (Run / Task / Output / Artifact /
+  Human Review), **Schema**, **Workflow / Workflow Step** (декларация), **Agent / Prompt**
+  (дескрипторы), **Composition Root** (build-time wiring), валидирующий wiring и observability-слой.
+- **Чего документ НЕ делает.** Не меняет поведение, не добавляет код/сущности, не меняет ADR. Это
+  **отметка состояния**.
 
 ---
 
-## 1. Слои системы (зафиксированы)
+## 1. Слои системы (зафиксированы, post-3A)
 
 ```
-   Observability (log-only)        — пассивный след решений валидации
-        ▲ (только наблюдает, не влияет)
+   Composition Root (build-time)    — pure dumb graph compiler (собирает граф из статических контрактов)
+        │ конструирует и инъектирует (на build-time)
+        ▼
+   Application                      — оркестрация (CD = mapping/selection/trigger) + wiring валидации
         │
-   Application                      — оркестрация и wiring поверх домена
-        │
-   Domain                          — единственный носитель бизнес-истины
+   Domain                          — единственный носитель бизнес-истины (state machine у Run)
         ▲
         │ (зависимости направлены внутрь)
-   Infrastructure (LLM only)        — единственный внешний поставщик в этом baseline
+   Infrastructure (LLM only)        — единственный внешний поставщик за портом TaskExecutor
+   Observability (log-only)         — пассивный след решений Schema.validate
 ```
 
 ### 1.1 Domain layer (ядро, источник истины)
-- **Модули:** `domain/run.py`, `domain/task.py`, `domain/output.py`, `domain/artifact.py`,
-  `domain/human_review.py`, `domain/schema.py`.
-- **Ответственность:** состояние и инварианты производства. **Run** — агрегат-корень исполнения,
-  владеющий Task / Output / Artifact / Human Review. **Schema** — самостоятельный корень каталога
-  (референсится, не владеется). Домен ни от чего не зависит.
+- **Модули:** `domain/run.py`, `task.py`, `output.py`, `artifact.py`, `human_review.py`,
+  `schema.py`, `workflow.py`, `agent.py`, `prompt.py`.
+- **Ответственность.** **Run** — агрегат-корень исполнения, **владеющий своей state machine** и
+  дочерними (Task / Output / Artifact / Human Review). **Schema** — самостоятельный корень-authority
+  контракта. **Workflow / Workflow Step** — неизменяемая декларация (порядок = список; `depends_on`
+  инертен). **Agent / Prompt** — неизменяемые пассивные дескрипторы (`agent_ref → prompt_id`; Prompt
+  = текст + ссылка на Schema). Домен ни от чего не зависит.
 
 ### 1.2 Application layer (оркестрация и wiring)
-- **Модули:** `application/content_director.py`, `application/task_execution.py`,
-  `application/schema_validation.py`, `application/schema_observability.py`.
-- **Ответственность:** последовательность операций **через корень Run** (никогда в обход),
-  исполнение одного Task (`execute_task`), и **wiring валидации Schema** (resolution + вызов
-  `Schema.validate` + запись через существующий `Run.record_output`). Творческих и доменных решений
-  не принимает.
+- **Модули:** `application/content_director.py`, `task_execution.py`, `schema_validation.py`,
+  `schema_observability.py`.
+- **Ответственность.** `ContentDirector` — **mapping** (`Workflow.steps → Task` в порядке списка),
+  **selection** executor по `agent_ref`, **trigger** жизненного цикла Run (запрашивает переходы,
+  машиной не владеет). `execute_task` — исполнение одного Task через корень Run. `schema_validation`
+  — валидирующий wiring (opt-in). Творческих/доменных решений не принимает.
 
-### 1.3 Infrastructure layer (только LLM)
+### 1.3 Composition Root (build-time wiring — outermost)
+- **Модуль:** `composition.py`.
+- **Ответственность.** Pure **dumb build-time graph compiler** (ADR-0012): резолвит
+  `agent_ref → Agent → prompt_ref → Prompt`, конструирует `agent_ref → TaskExecutor` (инъекция
+  Prompt на construction), и (3A) `agent_ref → Schema` map; structural existence checks (build-time)
+  — без policy/semantics, без runtime-логики. Outermost-слой: импортирует domain/application/
+  infrastructure; на него никто не зависит.
+
+### 1.4 Infrastructure layer (только LLM)
 - **Модуль:** `infrastructure/llm.py` (`LLMClient` / `AnthropicLLMClient` / `LLMTaskExecutor`).
-- **Ответственность:** единственная точка выхода во внешний мир в этом baseline — вызов модели за
-  портом `TaskExecutor`. Провайдер заменяем; домен и оркестратор о нём не знают. Иных адаптеров в
-  замороженном состоянии нет.
+- **Ответственность.** Единственная точка выхода во внешний мир — вызов модели за портом
+  `TaskExecutor` (execution-only). Провайдер заменяем; домен/оркестратор о нём не знают.
 
-### 1.4 Observability layer (только лог)
+### 1.5 Observability layer (только лог)
 - **Модуль:** `application/schema_observability.py`.
-- **Ответственность:** пассивная фиксация **факта** решения `Schema.validate` (VALID / INVALID)
-  как структурированного события (`schema_id`, `schema_version`, результат, `timestamp`,
-  хэш-подпись нагрузки). Best-effort, без сырых значений (без секретов/PII). **Наблюдает, но не
-  управляет.**
+- **Ответственность.** Пассивная фиксация **факта** решения `Schema.validate` (VALID/INVALID) как
+  структурированного события (без сырых значений; best-effort). **Наблюдает, не управляет.**
 
 ---
 
-## 2. Инварианты (зафиксированы; новых не вводится)
+## 2. Инварианты (зафиксированы, post-3A)
 
-Перечисленное — **переформулировка уже действующих** правил реализации, а не новые инварианты.
+Переформулировка уже действующих правил; новых не вводится.
 
-1. **Run — единственный источник истины исполнения.** Состояние и переходы производства
-   (Task / Output / Artifact / Human Review) меняются **только через корень Run**; обход границы
-   агрегата запрещён.
-2. **Schema = чистая функция-решение.** `Schema.validate` детерминирована, без внешних
-   зависимостей и побочных эффектов; Schema **не знает** Run, Output, Content Director и не
-   управляет потоком. Валидация допустима только против `ACTIVE`-версии.
-3. **Output = неизменяемая запись результата.** Output рождается сразу в `VALID`/`INVALID`,
-   далее не мутирует; новая попытка порождает новый Output.
-4. **INVALID исключается из исполнения, но фиксируется в observability.** В валидирующем wiring
-   невалидный результат **не** записывается как Output (gated out), но **наблюдается** в лог-слое.
-5. **Observability НЕ влияет на исполнение.** Лог-слой опционален и best-effort: его отсутствие
-   или сбой не меняют поведение системы.
-6. **Два пути записи Output сосуществуют без изменения контрактов.** Legacy
-   (`TaskExecutor → Run.record_output → Output(VALID)`) не тронут; validated path добавлен
-   аддитивно поверх. Контракты Run / Output / TaskExecutor неизменны.
-7. **Зависимости направлены внутрь.** Infrastructure и Application зависят от Domain, не наоборот;
-   Schema-модуль не импортирует Run / Task / Output.
+1. **Run — источник истины исполнения и владелец state machine.** Таблица переходов, guard,
+   мутация статуса, события, инварианты — **внутри Run**; изменения только через корень. *(ADR-0013
+   §8, Variant A.)*
+2. **ContentDirector — trigger/orchestrator, не владелец машины.** Только политика
+   (`steps → Task`, selection по `agent_ref`, запрос переходов); state machine в CD нет.
+3. **Единый runtime-вход, без альтернатив.** Lifecycle триггерится только через CD
+   (`execute_workflow`); никто не ведёт Run в обход корня.
+4. **Schema = authority над execution-контрактом** (ADR-0008): определяет и валидирует;
+   детерминирована, без внешних зависимостей; валидация только против `ACTIVE`-версии.
+5. **Prompt = passive artifact** (ADR-0011): неизменяемый текст + `schema_ref` как **ссылка** на
+   Schema (не authority). **Agent = passive descriptor** (`agent_ref → prompt_id`).
+6. **Composition Root = pure dumb build-time compiler** (ADR-0012): детерминированная сборка,
+   только structural existence checks; resolution `agent_ref`/`prompt_ref` — **только здесь**;
+   никаких runtime-решений/policy.
+7. **Workflow = декларация** (ADR-0009): порядок исполнения = порядок `steps`; `depends_on` инертен.
+8. **Output = неизменяемая запись результата**; рождается терминально, не мутирует; новая попытка —
+   новый Output.
+9. **Observability НЕ влияет на исполнение** (opt-in, best-effort).
+10. **Зависимости направлены внутрь.** Infrastructure/Application/Composition зависят от Domain;
+    домен — ни от кого. Schema/Workflow/Agent/Prompt-модули ядро не импортируют наружу.
 
 ---
 
 ## 3. Границы запрета расширения (freeze boundaries)
 
-Следующее **намеренно отсутствует** в baseline и **не может быть добавлено без нового ADR**.
-Любая попытка ввести их «по ходу» нарушает заморозку.
+Следующее **намеренно отсутствует** и вводится **только через ADR**:
 
-- **No event sourcing.** Доменные события фиксируются в журнале Run как след; **переход к
-  event-sourcing-хранилищу/реконструкции состояния из событий запрещён** без ADR.
-- **No analytics pipeline.** Observability — **только лог факта** решений. Агрегация, метрики,
-  отчётность, аналитический агент — вне baseline; требуют ADR (ср. отложенный `Analytics Record`,
-  DOMAIN_MODEL §2.15).
-- **No feedback loop.** Никакой автоматической реакции на накопленные данные (переназначение
-  моделей, авто-оптимизация промптов/схем) — запрещено без ADR.
-- **No schema evolution engine.** Schema — версионируемое определение с ручным жизненным циклом
-  `Draft → Active → Deprecated`; **миграции, совместимость версий, авто-эволюция контрактов** —
-  вне baseline (DOMAIN_MODEL §2.8 «правила совместимости» отложены; ADR-0008 Deferred).
-- **No new domain entities / no execution-flow change.** Evaluation/QA, Workflow / Workflow Step,
-  Agent / Prompt, Content Brief / Content Type, Analytics Record — **спроектированы, но не
-  реализованы**; ввод каждого — отдельный ADR → SPEC/ACCEPTANCE → реализация.
+- **No event sourcing.** События — след в журнале Run; реконструкция состояния из событий — через ADR.
+- **No analytics pipeline.** Observability — только лог факта; агрегация/метрики/аналитический агент
+  (отложенный `Analytics Record`, DOMAIN_MODEL §2.15) — через ADR.
+- **No feedback loop.** Автоматическая реакция на накопленные данные — через ADR.
+- **No schema evolution engine.** Миграции/совместимость версий/авто-эволюция контрактов — через ADR.
+- **No new domain entities без процесса.** **Реализованы:** Run/Task/Output/Artifact/Human Review,
+  Schema, Workflow/Workflow Step, Agent/Prompt. **Ещё не реализованы** (каждая — ADR→SPEC→tests):
+  **Evaluation/QA**, **Content Brief**, **Content Type**, **Analytics Record**.
 
-> Также остаются в силе ранее зафиксированные отложенные пункты ADR-0008: конвергенция двух путей
-> записи Output в единый валидирующий `record_output`, доменное событие для INVALID, маршрутизация
-> INVALID, и флаг **G-1** (рантайм-актор каталога Schema). Все они — **через ADR**, не «по ходу».
+> **Отложенные пункты в силе:** конвергенция двух путей записи Output в единый валидирующий
+> `record_output` (ADR-0008 target — **Slice 3 в работе**), доменное событие/маршрутизация INVALID,
+> fail-fast в оркестрации (F1), флаг **G-1** (рантайм-актор каталога Schema). Все — через ADR/
+> запланированные слайсы, не «по ходу».
 
 ---
 
-## 4. Статус системы
+## 4. Post-3A заметки о состоянии (re-freeze)
 
-> **System is in stable minimal architecture state.**
+- **Schema-resolution map построен, но НЕ подключён.** `composition.build_schema_map` создаёт
+  `agent_ref → Schema`, но **не используется** ни в одном пути исполнения (orphan capability) —
+  **нулевой эффект на runtime**. Подключение — Slice 3D.
+- **Transitional enforcement сохранён.** Default-путь фиксирует Output `VALID` через legacy
+  `record_output` (без `Schema.validate`); целевая модель — единый валидирующий путь (ADR-0008),
+  достигается конвергенцией **Slice 3 (3C/3D)**. До конвергенции — это санкционированное переходное
+  состояние, не дрейф.
+- **Скрытых эффектов от Schema-слоя нет** (подтверждено integration stabilization pass): детерминизм
+  CD→executor→Run сохранён; executor-map и schema-map независимы (referential consistency, не
+  coupling); `build_schema_map` — pure build-time (модель не вызывает, Run не создаёт).
 
-- Реализованы и проверены гейтом качества: доменное ядро (Run / Task / Output / Artifact /
-  Human Review), Schema (ADR-0008), валидирующий wiring и observability-слой.
-- Система **логически не продолжаема без нового ADR**: любое следующее расширение (новая сущность,
-  эволюция Schema, аналитика, обратная связь, event sourcing) пересекает границу раздела 3 и
-  требует прохождения процесса `ADR → SPEC/ACCEPTANCE → реализация`.
-- Этот документ — **архитектурный baseline**. Его наличие означает: дальнейшее развитие ведётся
-  только осознанно и прослеживаемо, а не инкрементальным дрейфом.
+---
+
+## 5. Статус системы
+
+> **System is in a stable architecture state (post-3A baseline).**
+
+- Реализованы и зелены по гейту: ядро (Run/Task/Output/Artifact/Human Review), Schema, Workflow,
+  Agent/Prompt, Composition Root, валидирующий wiring, observability.
+- Любое **новое** расширение (Evaluation/QA, Content Brief/Type, Analytics, event sourcing,
+  schema-evolution, feedback) пересекает раздел 3 и требует `ADR → SPEC/ACCEPTANCE → реализация`.
+- Дальнейшая конвергенция enforcement идёт **запланированными слайсами** (Slice 3), а не дрейфом.
 
 ---
 
@@ -140,12 +168,16 @@
 | Элемент baseline | Опора |
 |---|---|
 | Слои и направление зависимостей | `ARCHITECTURE.md` §15; `PROJECT.md` §7 |
-| Run как корень исполнения | `DOMAIN_MODEL.md` §9.1; `ADR-0003` |
-| Task / Output / Artifact / Human Review | `ADR-0004` / `ADR-0005` / `ADR-0006` / `ADR-0007` |
-| Schema (чистая валидация, жизненный цикл) | `ADR-0008`; `SCHEMA_SPEC.md`; `SCHEMA_ACCEPTANCE.md` |
+| Run как корень + state machine | `DOMAIN_MODEL.md` §9.1; `ADR-0003`; `ADR-0013` §8 (Variant A) |
+| Task / Output / Artifact / Human Review | `ADR-0004` / `0005` / `0006` / `0007` |
+| Schema (authority, жизненный цикл, валидация) | `ADR-0008`; `SCHEMA_SPEC.md` / `SCHEMA_ACCEPTANCE.md` |
+| Workflow / Workflow Step (декларация) | `ADR-0009`; `WORKFLOW_SPEC.md` / `WORKFLOW_ACCEPTANCE.md` |
+| Agent boundary / Agent+Prompt (дескрипторы) | `ADR-0010` / `ADR-0011`; `AGENT_SPEC.md` |
+| Composition Root (dumb build-time wiring) | `ADR-0012`; `composition.py` |
+| Execution Topology + Authority (single entry) | `ADR-0013` |
 | Два пути записи Output (legacy + validated) | `ADR-0008` (Migration); `application/schema_validation.py` |
 | Observability (log-only) | `application/schema_observability.py` |
-| Запрет расширения без ADR | `PROJECT.md` §11, §17; `ADR-0008` Deferred |
+| Schema-resolution map (3A, не подключён) | `composition.build_schema_map` |
 
-> Документ фиксирует состояние и не имеет приоритета над `PROJECT.md` / `ARCHITECTURE.md`. При
-> любом расхождении — источник истины вышестоящий (PROJECT.md, раздел 17).
+> Документ фиксирует состояние и не имеет приоритета над `PROJECT.md` / `ARCHITECTURE.md`. При любом
+> расхождении — источник истины вышестоящий (PROJECT.md, раздел 17).
