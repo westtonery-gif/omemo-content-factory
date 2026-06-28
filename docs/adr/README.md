@@ -34,3 +34,6 @@ be recorded as ADRs (PROJECT.md, sections 11 and 17).
 | [0008](0008-schema-entity-interface-contract.md) | Schema entity — interface contract + Output validation path | Accepted |
 | [0009](0009-workflow-and-workflow-step-declarative-contract.md) | Workflow + Workflow Step — declarative interface contract | Accepted |
 | [0010](0010-agent-boundary-non-execution-contract.md) | Agent boundary definition — non-execution role contract | Accepted |
+| [0011](0011-agent-prompt-binding-layer.md) | Agent + Prompt binding layer | Accepted |
+| [0012](0012-composition-root-application-wiring-layer.md) | Composition Root (Application Wiring Layer) | Accepted |
+| [0013](0013-execution-topology-contract.md) | Execution Topology Contract | Accepted |
