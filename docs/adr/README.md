@@ -33,3 +33,4 @@ be recorded as ADRs (PROJECT.md, sections 11 and 17).
 | [0007](0007-human-review-and-artifact-publication-path.md) | Human Review entity + the Artifact approval/publication path | Accepted |
 | [0008](0008-schema-entity-interface-contract.md) | Schema entity — interface contract + Output validation path | Accepted |
 | [0009](0009-workflow-and-workflow-step-declarative-contract.md) | Workflow + Workflow Step — declarative interface contract | Accepted |
+| [0010](0010-agent-boundary-non-execution-contract.md) | Agent boundary definition — non-execution role contract | Accepted |
