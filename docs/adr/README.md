@@ -38,3 +38,4 @@ be recorded as ADRs (PROJECT.md, sections 11 and 17).
 | [0012](0012-composition-root-application-wiring-layer.md) | Composition Root (Application Wiring Layer) | Accepted |
 | [0013](0013-execution-topology-contract.md) | Execution Topology Contract | Accepted |
 | [0014](0014-structured-output-port-and-generation-shape.md) | Structured Output Port and Generation Shape | Accepted |
+| [0015](0015-execution-state-recoverability.md) | Execution-State Recoverability and the Admission of Restored Runs | Accepted |
