@@ -9,10 +9,10 @@
 > состояние. Источник истины остаётся прежним: `PROJECT.md` → `ARCHITECTURE.md`. Любое расхождение
 > исправляется в пользу вышестоящих документов.
 
-**Версия документа:** 1.1 (Revision 2 — **post-3A re-freeze**)
+**Версия документа:** 1.2 (Revision 3 — **post-3D re-freeze**)
 **Статус:** Принят (архитектурный baseline — заморозка)
-**Дата:** 2026-06-28
-**Состояние системы:** **System is in a stable architecture state (post-3A baseline).**
+**Дата:** 2026-06-29
+**Состояние системы:** **System is in a stable architecture state (post-3D baseline).**
 
 > **Журнал ревизий.**
 > - **1.0** — минимальное ядро (Run / Task / Output / Artifact / Human Review, Schema,
@@ -22,6 +22,12 @@
 >   **Composition Root** (ADR-0012) и **Execution Topology + Authority** (ADR-0013); зафиксирован
 >   Schema-resolution map (3A, построен, **не подключён** к исполнению). Инварианты переформулированы
 >   под новую архитектуру. Поведение исполнения не изменено (transitional enforcement сохранён).
+> - **1.2 (Revision 3)** — re-freeze после завершения **Slice 3 «Schema enforcement convergence»**
+>   (3A→3D, evaluation-ownership = **Variant A**, ADR-0013 §8). Зафиксирован **единый валидирующий
+>   путь финализации Output**: Application **вызывает** `Schema.validate` (authority), `Run.record_output`
+>   как **pure sink** персистит verdict. **Schema-resolution map подключён** и участвует в execution
+>   pipeline. **Легаси always-VALID путь удалён.** Новых сущностей/ADR не вводилось; это отметка
+>   фактического состояния (§4).
 
 ---
 
@@ -37,7 +43,7 @@
 
 ---
 
-## 1. Слои системы (зафиксированы, post-3A)
+## 1. Слои системы (зафиксированы, post-3D)
 
 ```
    Composition Root (build-time)    — pure dumb graph compiler (собирает граф из статических контрактов)
@@ -66,14 +72,18 @@
   `schema_observability.py`.
 - **Ответственность.** `ContentDirector` — **mapping** (`Workflow.steps → Task` в порядке списка),
   **selection** executor по `agent_ref`, **trigger** жизненного цикла Run (запрашивает переходы,
-  машиной не владеет). `execute_task` — исполнение одного Task через корень Run. `schema_validation`
-  — валидирующий wiring (opt-in). Творческих/доменных решений не принимает.
+  машиной не владеет). `execute_task` — исполнение одного Task через корень Run; финализация Output
+  идёт **единственным валидирующим путём** (`schema_validation.validate_and_record_output`):
+  Application **вызывает** `Schema.validate` (authority), а `Run.record_output` как **pure sink**
+  персистит verdict (VALID/INVALID). Легаси always-VALID путь отсутствует. Творческих/доменных
+  решений Application не принимает.
 
 ### 1.3 Composition Root (build-time wiring — outermost)
 - **Модуль:** `composition.py`.
 - **Ответственность.** Pure **dumb build-time graph compiler** (ADR-0012): резолвит
   `agent_ref → Agent → prompt_ref → Prompt`, конструирует `agent_ref → TaskExecutor` (инъекция
-  Prompt на construction), и (3A) `agent_ref → Schema` map; structural existence checks (build-time)
+  Prompt на construction), и `agent_ref → Schema` map (**подключён** к исполнению — см. §4);
+  structural existence checks (build-time)
   — без policy/semantics, без runtime-логики. Outermost-слой: импортирует domain/application/
   infrastructure; на него никто не зависит.
 
@@ -89,7 +99,7 @@
 
 ---
 
-## 2. Инварианты (зафиксированы, post-3A)
+## 2. Инварианты (зафиксированы, post-3D)
 
 Переформулировка уже действующих правил; новых не вводится.
 
@@ -129,37 +139,45 @@
   Schema, Workflow/Workflow Step, Agent/Prompt. **Ещё не реализованы** (каждая — ADR→SPEC→tests):
   **Evaluation/QA**, **Content Brief**, **Content Type**, **Analytics Record**.
 
-> **Отложенные пункты в силе:** конвергенция двух путей записи Output в единый валидирующий
-> `record_output` (ADR-0008 target — **Slice 3 в работе**), доменное событие/маршрутизация INVALID,
-> fail-fast в оркестрации (F1), флаг **G-1** (рантайм-актор каталога Schema). Все — через ADR/
-> запланированные слайсы, не «по ходу».
+> **Slice 3 завершён.** Конвергенция в единый валидирующий путь записи Output (`Run.record_output`
+> как pure sink, ADR-0008 target / ADR-0013 §8 Variant A) **достигнута**. **Остающиеся follow-ups**
+> (каждый — через ADR/запланированный слайс, не «по ходу»): **LLM structured output** —
+> `LLMTaskExecutor` пока не отдаёт `payload_fields`, поэтому реальная LLM-ветка не производит
+> Output/Artifact (Option A, отложено); доменное **событие/маршрутизация INVALID**; **fail-fast**
+> в оркестрации (F1, ADR-0009 non-goals); флаг **G-1** (рантайм-актор каталога Schema).
 
 ---
 
-## 4. Post-3A заметки о состоянии (re-freeze)
+## 4. Post-3D заметки о состоянии (re-freeze)
 
-- **Schema-resolution map построен, но НЕ подключён.** `composition.build_schema_map` создаёт
-  `agent_ref → Schema`, но **не используется** ни в одном пути исполнения (orphan capability) —
-  **нулевой эффект на runtime**. Подключение — Slice 3D.
-- **Transitional enforcement сохранён.** Default-путь фиксирует Output `VALID` через legacy
-  `record_output` (без `Schema.validate`); целевая модель — единый валидирующий путь (ADR-0008),
-  достигается конвергенцией **Slice 3 (3C/3D)**. До конвергенции — это санкционированное переходное
-  состояние, не дрейф.
+- **Schema-resolution map подключён.** `composition.build_schema_map` строит `agent_ref → Schema`,
+  а `build_content_director` / `compile_runtime` прокидывают его в `ContentDirector`. На исполнении
+  CD **селектит** Schema (`_resolve_schema`) и передаёт в `execute_task → validate_and_record_output`
+  — map **участвует в execution pipeline** (это уже не orphan capability).
+- **Единый валидирующий путь финализации Output (Variant A).** При наличии `schema` и структурных
+  `payload_fields` Application **вызывает** `Schema.validate` (authority → verdict VALID/INVALID),
+  а `Run.record_output` как **pure sink** (`valid: bool`) персистит результат; INVALID **записывается**,
+  не отсекается. **Легаси always-VALID путь удалён**: без `schema`/структурных полей Output не
+  рождается (нет always-VALID fallback). Роли строго разделены: **Schema = decision/authority**,
+  **Application = invocation**, **Run = persistence**.
 - **Скрытых эффектов от Schema-слоя нет** (подтверждено integration stabilization pass): детерминизм
   CD→executor→Run сохранён; executor-map и schema-map независимы (referential consistency, не
-  coupling); `build_schema_map` — pure build-time (модель не вызывает, Run не создаёт).
+  coupling); `build_schema_map` — pure build-time (модель не вызывает, Run не создаёт); observability
+  — log-only, на исполнение не влияет.
 
 ---
 
 ## 5. Статус системы
 
-> **System is in a stable architecture state (post-3A baseline).**
+> **System is in a stable architecture state (post-3D baseline).**
 
 - Реализованы и зелены по гейту: ядро (Run/Task/Output/Artifact/Human Review), Schema, Workflow,
-  Agent/Prompt, Composition Root, валидирующий wiring, observability.
+  Agent/Prompt, Composition Root, **единый валидирующий путь финализации Output** (Slice 3
+  завершён), observability.
 - Любое **новое** расширение (Evaluation/QA, Content Brief/Type, Analytics, event sourcing,
   schema-evolution, feedback) пересекает раздел 3 и требует `ADR → SPEC/ACCEPTANCE → реализация`.
-- Дальнейшая конвергенция enforcement идёт **запланированными слайсами** (Slice 3), а не дрейфом.
+- Остающиеся follow-ups (LLM structured output, событие/маршрутизация INVALID, fail-fast F1,
+  G-1) идут **через ADR/запланированные слайсы**, а не дрейфом.
 
 ---
 
@@ -175,9 +193,9 @@
 | Agent boundary / Agent+Prompt (дескрипторы) | `ADR-0010` / `ADR-0011`; `AGENT_SPEC.md` |
 | Composition Root (dumb build-time wiring) | `ADR-0012`; `composition.py` |
 | Execution Topology + Authority (single entry) | `ADR-0013` |
-| Два пути записи Output (legacy + validated) | `ADR-0008` (Migration); `application/schema_validation.py` |
+| Единый валидирующий путь записи Output (`record_output` = pure sink) | `ADR-0008` (target); `ADR-0013` §8 (Variant A); `application/schema_validation.py` |
 | Observability (log-only) | `application/schema_observability.py` |
-| Schema-resolution map (3A, не подключён) | `composition.build_schema_map` |
+| Schema-resolution map (подключён к исполнению) | `composition.build_schema_map` → `ContentDirector` |
 
 > Документ фиксирует состояние и не имеет приоритета над `PROJECT.md` / `ARCHITECTURE.md`. При любом
 > расхождении — источник истины вышестоящий (PROJECT.md, раздел 17).
