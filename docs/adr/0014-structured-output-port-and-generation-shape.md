@@ -84,9 +84,13 @@ per-`agent_ref` branching), decision-free, and reads a public read-only attribut
 already exposed via `SchemaView`). It is the **same kind** of operation `ADR-0012` already sanctions
 for `Prompt.system` / `Prompt.schema_ref` injection — reading an attribute of a resolved static
 contract and injecting it as executor construction input. The Composition Root **transports the
-shape; it never applies the rule** — `Schema.validate` remains the sole evaluator. The existing
-symmetry holds: schemas wired ⇒ generation shape + validated Output; no schemas ⇒ no shape ⇒ no
-Output.
+shape; it never applies the rule** — `Schema.validate` remains the sole evaluator. The generation
+shape is therefore a **mandatory part of a structured executor's configuration**: with no resolvable
+Schema there is no shape, and — because the port is structured-only (§4) — there is no valid
+executor to construct. The shape is resolved at build time in the Composition Root (above), so its
+absence surfaces as a build-time failure, not a runtime one. *(Errata: an earlier draft stated a
+"no schemas ⇒ no Output" symmetry; that described the pre-`ADR-0014` text port and is inconsistent
+with the structured-only port. Corrected here without changing any decision.)*
 
 The same wiring delivers `Prompt.user_template` into the executor, closing the `ADR-0011` §5 /
 `ADR-0012` deferral. This is delivery of existing data, not a new decision.

@@ -40,13 +40,22 @@ def build_executor_map(
     agents: Iterable[Agent],
     prompts: Mapping[PromptId, Prompt],
     client: LLMClient,
+    schemas: Mapping[str, Schema],
 ) -> dict[str, TaskExecutor]:
     """Compile the `agent_ref → TaskExecutor` mapping from the static catalogues (build-time).
 
-    Deterministic, uniform construction: each Agent's `prompt_ref` is resolved to a Prompt and that
-    Prompt is injected into a freshly constructed executor, keyed by the Agent's `agent_id`. No Task
-    is run and the model is not called here. Build-time consistency is enforced: a duplicate
-    `agent_ref` or an unknown `prompt_ref` raises ``CompositionError``.
+    Deterministic, uniform construction: each Agent's `prompt_ref` is resolved to a Prompt, and the
+    Prompt's `system` / `user_template` plus the **generation shape** projected from the Schema
+    (`agent_ref → Prompt → schema_ref → Schema → required_fields`, `ADR-0014` §3 — a dumb structural
+    projection, not validation) are injected into a freshly constructed executor, keyed by the
+    Agent's `agent_id`. No Task is run and the model is not called here. ``schemas`` is
+    **required**: after `ADR-0014` a structured executor cannot exist without a generation shape
+    (corollary of the structured-only port; see `ADR-0014` §4). Build-time consistency is enforced
+    — a duplicate
+    `agent_ref`, an unknown `prompt_ref`, or an unknown `schema_ref` raises ``CompositionError``
+    (structural existence checks, `ADR-0012`). An empty shape is rejected by the executor's own
+    construction invariant (`ADR-0014` §3, Locus 2); the Composition Root passes parameters and does
+    not judge configuration correctness.
     """
     executors: dict[str, TaskExecutor] = {}
     for agent in agents:
@@ -57,8 +66,17 @@ def build_executor_map(
             raise CompositionError(
                 f"agent '{agent.agent_id}' references unknown prompt '{agent.prompt_ref}'"
             )
+        schema = schemas.get(prompt.schema_ref)
+        if schema is None:
+            raise CompositionError(
+                f"prompt '{prompt.prompt_id}' references unknown schema '{prompt.schema_ref}'"
+            )
         executors[agent.agent_id] = LLMTaskExecutor(
-            client=client, system_prompt=prompt.system, schema_ref=prompt.schema_ref
+            client=client,
+            system_prompt=prompt.system,
+            user_template=prompt.user_template,
+            schema_ref=prompt.schema_ref,
+            output_fields=schema.view.required_fields,
         )
     return executors
 
@@ -98,17 +116,17 @@ def build_content_director(
     agents: Iterable[Agent],
     prompts: Mapping[PromptId, Prompt],
     client: LLMClient,
-    schemas: Mapping[str, Schema] | None = None,
+    schemas: Mapping[str, Schema],
 ) -> ContentDirector:
-    """Compile the executor (and optional schema) maps and hand them to a ``ContentDirector``.
+    """Compile the executor and schema maps and hand them to a ``ContentDirector``.
 
     The Content Director only *selects* from the assembled maps at runtime (`ADR-0013` §8); it
-    never builds them. When ``schemas`` is supplied, an `agent_ref → Schema` map is built (3A) so
-    execution finalizes Output through the validated path; without it, no Output is produced (no
-    always-VALID fallback).
+    never builds them. ``schemas`` is **required**: it supplies both the generation shape injected
+    into each executor (`ADR-0014` §3) and the `agent_ref → Schema` map through which execution
+    finalizes Output via the validated path (`ADR-0013` §8, Variant A).
     """
-    schema_map = build_schema_map(agents, prompts, schemas) if schemas is not None else None
-    return ContentDirector(build_executor_map(agents, prompts, client), schema_map)
+    executors = build_executor_map(agents, prompts, client, schemas)
+    return ContentDirector(executors, build_schema_map(agents, prompts, schemas))
 
 
 def validate_workflow_executors(workflow: Workflow, executors: Mapping[str, TaskExecutor]) -> None:
@@ -132,16 +150,16 @@ def compile_runtime(
     prompts: Mapping[PromptId, Prompt],
     client: LLMClient,
     workflow: Workflow,
-    schemas: Mapping[str, Schema] | None = None,
+    schemas: Mapping[str, Schema],
 ) -> ContentDirector:
-    """Build executor (+optional schema) maps, structurally check vs ``workflow``, wire the CD.
+    """Build executor + schema maps, structurally check vs ``workflow``, wire the CD.
 
     Build-time graph construction for a given Workflow: a structural existence check (no
     workflow-semantics, no policy) catches an unknown ``agent_ref`` as a ``CompositionError`` here,
-    so selection never raises at runtime. When ``schemas`` is supplied, an `agent_ref → Schema` map
-    is built so execution finalizes Output through the validated path (3D).
+    so selection never raises at runtime. ``schemas`` is **required** — it supplies the generation
+    shape per executor (`ADR-0014` §3) and the `agent_ref → Schema` map for the validated Output
+    path (`ADR-0013` §8, Variant A).
     """
-    executors = build_executor_map(agents, prompts, client)
+    executors = build_executor_map(agents, prompts, client, schemas)
     validate_workflow_executors(workflow, executors)
-    schema_map = build_schema_map(agents, prompts, schemas) if schemas is not None else None
-    return ContentDirector(executors, schema_map)
+    return ContentDirector(executors, build_schema_map(agents, prompts, schemas))

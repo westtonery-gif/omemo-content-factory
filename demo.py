@@ -15,6 +15,7 @@ it and exits cleanly. No QA, Human Review, publication or external integrations 
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from collections.abc import Mapping
@@ -24,6 +25,7 @@ from omemo_content_factory.application.task_execution import TaskExecutor
 from omemo_content_factory.domain.artifact import ArtifactCreated, ArtifactEvent
 from omemo_content_factory.domain.output import OutputEvent
 from omemo_content_factory.domain.run import Run, RunEvent, RunFailed
+from omemo_content_factory.domain.schema import Schema, SchemaStatus, SchemaVersion
 from omemo_content_factory.domain.task import TaskEvent, TaskFailed
 from omemo_content_factory.infrastructure.llm import AnthropicLLMClient, LLMTaskExecutor
 
@@ -51,6 +53,19 @@ EDITOR_PROMPT = (
     "polished article: improve clarity, flow and accuracy, keep a calm non-alarmist tone, and "
     "keep a brief medical disclaimer. Return only the final article text."
 )
+
+
+def _active_schema(schema_ref: str, field_name: str) -> Schema:
+    """An ACTIVE Schema requiring the role's single output field (`ADR-0014` generation shape)."""
+    schema_id, _, version = schema_ref.partition("@v")
+    schema = Schema.create(
+        schema_id=schema_id,
+        version=SchemaVersion(int(version)),
+        description=f"{schema_id} output contract",
+        required_fields=[field_name],
+    )
+    schema.transition(SchemaStatus.ACTIVE)
+    return schema
 
 
 def safe_print(text: str = "") -> None:
@@ -128,7 +143,15 @@ def print_final_article(run: Run) -> None:
     if final is None:
         safe_print("(no final article — the run did not produce a final Output)")
         return
-    safe_print(final.payload)
+    # Output.payload is the deterministic serialization of the structured fields (ADR-0014 §6);
+    # render the field values for readability, falling back to the raw payload.
+    try:
+        fields = json.loads(final.payload)
+    except ValueError:
+        safe_print(final.payload)
+        return
+    for value in fields.values():
+        safe_print(str(value))
 
 
 def main() -> None:
@@ -144,11 +167,35 @@ def main() -> None:
     model = os.environ.get("OMEMO_LLM_MODEL", DEFAULT_MODEL)
     client = AnthropicLLMClient(model=model)
     executors: Mapping[str, TaskExecutor] = {
-        "researcher@v1": LLMTaskExecutor(client, RESEARCH_PROMPT, "research-notes@v1"),
-        "writer@v1": LLMTaskExecutor(client, WRITER_PROMPT, "article-draft@v1"),
-        "editor@v1": LLMTaskExecutor(client, EDITOR_PROMPT, "final-article@v1"),
+        "researcher@v1": LLMTaskExecutor(
+            client=client,
+            system_prompt=RESEARCH_PROMPT,
+            user_template="{input}",
+            schema_ref="research-notes@v1",
+            output_fields=("notes",),
+        ),
+        "writer@v1": LLMTaskExecutor(
+            client=client,
+            system_prompt=WRITER_PROMPT,
+            user_template="{input}",
+            schema_ref="article-draft@v1",
+            output_fields=("draft",),
+        ),
+        "editor@v1": LLMTaskExecutor(
+            client=client,
+            system_prompt=EDITOR_PROMPT,
+            user_template="{input}",
+            schema_ref="final-article@v1",
+            output_fields=("article",),
+        ),
     }
-    director = ContentDirector(executors)
+    # Per-role ACTIVE Schemas (the generation shape + the validated-Output authority, ADR-0014).
+    schemas: Mapping[str, Schema] = {
+        "researcher@v1": _active_schema("research-notes@v1", "notes"),
+        "writer@v1": _active_schema("article-draft@v1", "draft"),
+        "editor@v1": _active_schema("final-article@v1", "article"),
+    }
+    director = ContentDirector(executors, schemas)
 
     run = Run.create(
         run_id="run-magnesium-001",
