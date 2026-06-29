@@ -37,3 +37,4 @@ be recorded as ADRs (PROJECT.md, sections 11 and 17).
 | [0011](0011-agent-prompt-binding-layer.md) | Agent + Prompt binding layer | Accepted |
 | [0012](0012-composition-root-application-wiring-layer.md) | Composition Root (Application Wiring Layer) | Accepted |
 | [0013](0013-execution-topology-contract.md) | Execution Topology Contract | Accepted |
+| [0014](0014-structured-output-port-and-generation-shape.md) | Structured Output Port and Generation Shape | Accepted |
