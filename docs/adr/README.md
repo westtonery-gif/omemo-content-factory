@@ -39,3 +39,4 @@ be recorded as ADRs (PROJECT.md, sections 11 and 17).
 | [0013](0013-execution-topology-contract.md) | Execution Topology Contract | Accepted |
 | [0014](0014-structured-output-port-and-generation-shape.md) | Structured Output Port and Generation Shape | Accepted |
 | [0015](0015-execution-state-recoverability.md) | Execution-State Recoverability and the Admission of Restored Runs | Accepted |
+| [0016](0016-provider-model-selection-ownership.md) | Provider / Model Selection Ownership | Accepted |
