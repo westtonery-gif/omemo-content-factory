@@ -1,6 +1,6 @@
 # ADR-0016: Provider / Model Selection Ownership
 
-- **Status:** Proposed (lightweight additive realization; no new entity, no new contract, no new principle)
+- **Status:** Accepted (lightweight additive realization; no new entity, no new contract, no new principle)
 - **Date:** 2026-07-12
 - **Deciders:** Lead Architect / Domain Architect
 - **Type:** Light Capability — first realization of an already-mandated principle. No architecture change.
