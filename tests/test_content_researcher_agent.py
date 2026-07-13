@@ -1,0 +1,67 @@
+"""Tests for the ``content_researcher@v1`` (Rin) role definition.
+
+Verify the migrated assets are valid and self-consistent, that the Composition Root resolves them
+without change (agent -> prompt -> schema -> executor with the right generation shape), and that a
+keyless run through the assembled ContentDirector produces a schema-valid ``content-research``
+Output. Same shape as the ``script_writer`` (Leo) tests — this is Pattern Application.
+"""
+
+from __future__ import annotations
+
+from omemo_content_factory.agents import content_researcher as rin
+from omemo_content_factory.composition import build_content_director, build_executor_map
+from omemo_content_factory.domain.run import Run, RunStatus
+from omemo_content_factory.domain.schema import SchemaStatus
+from omemo_content_factory.domain.task import TaskStatus
+from omemo_content_factory.domain.workflow import Workflow, WorkflowStep
+from omemo_content_factory.infrastructure.fake_llm import FakeLLMClient
+from omemo_content_factory.infrastructure.llm import LLMTaskExecutor
+
+
+def test_assets_are_valid_and_self_consistent() -> None:
+    view = rin.CONTENT_RESEARCH_SCHEMA.view
+    assert view.status is SchemaStatus.ACTIVE
+    assert view.required_fields == ("audience", "angle")
+    assert rin.CONTENT_RESEARCHER_AGENT.agent_id == "content_researcher@v1"
+    # agent -> prompt -> schema references chain together through the exposed catalogues.
+    assert rin.PROMPTS[rin.CONTENT_RESEARCHER_AGENT.prompt_ref] is rin.CONTENT_RESEARCHER_PROMPT
+    assert rin.SCHEMAS[rin.CONTENT_RESEARCHER_PROMPT.schema_ref] is rin.CONTENT_RESEARCH_SCHEMA
+    assert rin.CONTENT_RESEARCHER_PROMPT.schema_ref == "content-research-report"
+
+
+def test_composition_resolves_rin_with_generation_shape() -> None:
+    executors = build_executor_map(rin.AGENTS, rin.PROMPTS, FakeLLMClient(), rin.SCHEMAS)
+    executor = executors[rin.AGENT_REF]
+    assert isinstance(executor, LLMTaskExecutor)
+    assert executor.schema_ref == "content-research-report"
+    assert executor.output_fields == ("audience", "angle")  # shape projected from Schema
+
+
+def test_keyless_run_produces_valid_content_research() -> None:
+    director = build_content_director(rin.AGENTS, rin.PROMPTS, FakeLLMClient(), rin.SCHEMAS)
+    run = Run.create(run_id="rin-1", content_brief_ref="brief", workflow_version_ref="wf@1")
+    workflow = Workflow.create(
+        workflow_id="wf",
+        name="wf",
+        steps=[
+            WorkflowStep(
+                step_id="s1",
+                task_type="research",
+                agent_ref=rin.AGENT_REF,
+                schema_ref=rin.SCHEMA_REF,
+            )
+        ],
+    )
+
+    director.execute_workflow(run, workflow, brief="умная кофеварка")
+
+    assert run.status is RunStatus.COMPLETED
+    assert [v.status for v in run.tasks] == [TaskStatus.SUCCEEDED]
+    assert run.task(run.tasks[0].task_id).output is not None  # Output recorded via validating path
+
+
+def test_fake_output_satisfies_the_schema() -> None:
+    # The keyless provider's output for the required fields is schema-valid (audience/angle).
+    fields = rin.CONTENT_RESEARCH_SCHEMA.view.required_fields
+    payload = FakeLLMClient().complete(system="s", user="brief", fields=fields)
+    assert rin.CONTENT_RESEARCH_SCHEMA.validate(payload).is_valid
